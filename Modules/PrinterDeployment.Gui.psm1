@@ -106,7 +106,8 @@ if ($MyInvocation.InvocationName -ne '.') {
 function Get-PDGpoGuide {
     param([string]$Root)
     if (-not $Root) { $Root = '\\server\share\Printers' }
-    $scriptPath = Join-Path $Root 'PrinterDeployment.ps1'; $configPath = Join-Path $Root 'printers.json'
+    $scriptPath = $Root.TrimEnd('\','/') + '\PrinterDeployment.ps1'
+    $configPath = $Root.TrimEnd('\','/') + '\printers.json'
     @"
 Recommended: Save deployment bundle, then copy Install-PrinterDeploymentTask.ps1 into the GPO.
 Computer GPO > Policies > Windows Settings > Scripts > Startup > PowerShell Scripts > Show Files
@@ -165,7 +166,7 @@ Windows Protected Print Mode blocks third-party drivers; Type 4 requires a compa
 "@
 }
 
-function Show-PDPrinterEditor {
+function New-PDPrinterEditorForm {
     param($Printer, [string]$Root, [string]$Architecture, $Owner)
     $dialog = New-Object Windows.Forms.Form
     $dialog.Text = if ($Printer) { 'Edit printer' } else { 'Add printer' }
@@ -173,8 +174,8 @@ function Show-PDPrinterEditor {
     $dialog.Font = New-Object Drawing.Font('Segoe UI', 10); $dialog.AutoScaleMode = 'Dpi'
     $layout = New-Object Windows.Forms.TableLayoutPanel
     $layout.Dock = 'Fill'; $layout.Padding = '14,14,14,14'; $layout.ColumnCount = 2; $layout.RowCount = 10
-    $layout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Absolute', 175)))
-    $layout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent', 100)))
+    [void]$layout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Absolute', 175)))
+    [void]$layout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent', 100)))
     $dialog.Controls.Add($layout)
     $name = New-Object Windows.Forms.TextBox
     $kind = New-Object Windows.Forms.ComboBox; $kind.DropDownStyle = 'DropDownList'; $kind.Items.AddRange(@('IPP','Type4'))
@@ -249,7 +250,14 @@ function Show-PDPrinterEditor {
             } catch { Show-PDError $_ }
         }
     }
-    try { if ($dialog.ShowDialog($Owner) -eq 'OK') { $data.Result } }
+    $dialog.Tag = $data
+    return $dialog
+}
+
+function Show-PDPrinterEditor {
+    param($Printer, [string]$Root, [string]$Architecture, $Owner)
+    $dialog = New-PDPrinterEditorForm -Printer $Printer -Root $Root -Architecture $Architecture -Owner $Owner
+    try { if ($dialog.ShowDialog($Owner) -eq 'OK') { $dialog.Tag.Result } }
     finally { $dialog.Dispose() }
 }
 
@@ -288,8 +296,8 @@ function New-PDClientsPanel {
     $view = @{ Loading=$false; Report=$null }
     $panel = New-Object Windows.Forms.TableLayoutPanel
     $panel.Dock='Fill'; $panel.ColumnCount=1; $panel.RowCount=4; $panel.Padding='10,10,10,10'
-    foreach ($height in @(48,160,65)) { $panel.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute',$height))) }
-    $panel.RowStyles.Add((New-Object Windows.Forms.RowStyle('Percent',100)))
+    foreach ($height in @(48,160,65)) { [void]$panel.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute',$height))) }
+    [void]$panel.RowStyles.Add((New-Object Windows.Forms.RowStyle('Percent',100)))
     $toolbar = New-Object Windows.Forms.FlowLayoutPanel; $toolbar.Dock='Fill'; $panel.Controls.Add($toolbar,0,0)
     $clients = New-Object Windows.Forms.DataGridView
     $clients.Dock='Fill'; $clients.ReadOnly=$true; $clients.AllowUserToAddRows=$false; $clients.RowHeadersVisible=$false
@@ -317,7 +325,7 @@ function New-PDClientsPanel {
     }
     $inventoryTab.Controls.Add($inventory)
     $requestsLayout = New-Object Windows.Forms.TableLayoutPanel; $requestsLayout.Dock='Fill'; $requestsLayout.ColumnCount=1; $requestsLayout.RowCount=2
-    $requestsLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Percent',100))); $requestsLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute',44)))
+    [void]$requestsLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Percent',100))); [void]$requestsLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute',44)))
     $requestsTab.Controls.Add($requestsLayout)
     $requests = New-Object Windows.Forms.DataGridView
     $requests.Dock='Fill'; $requests.ReadOnly=$true; $requests.AllowUserToAddRows=$false; $requests.RowHeadersVisible=$false
@@ -411,7 +419,7 @@ function New-PDClientsPanel {
     $panel
 }
 
-function Show-PDConfiguration {
+function New-PDConfigurationForm {
     param([string]$ConfigPath, [string]$SourceRoot)
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
@@ -427,18 +435,18 @@ function Show-PDConfiguration {
     $form.StartPosition = 'CenterScreen'; $form.Font = New-Object Drawing.Font('Segoe UI', 10); $form.AutoScaleMode = 'Dpi'
     $layout = New-Object Windows.Forms.TableLayoutPanel
     $layout.Dock = 'Fill'; $layout.Padding = '16,12,16,12'; $layout.ColumnCount = 1; $layout.RowCount = 5
-    foreach ($height in @(44, 90)) { $layout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', $height))) }
-    $layout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Percent', 100)))
-    $layout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', 50)))
-    $layout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', 40)))
+    foreach ($height in @(44, 90)) { [void]$layout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', $height))) }
+    [void]$layout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Percent', 100)))
+    [void]$layout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', 50)))
+    [void]$layout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', 40)))
     $form.Controls.Add($layout)
     $title = New-PDLabel 'Configure once. Deploy silently through Group Policy.'
     $title.Font = New-Object Drawing.Font('Segoe UI', 16, [Drawing.FontStyle]::Bold); $layout.Controls.Add($title, 0, 0)
     $settings = New-Object Windows.Forms.TableLayoutPanel
     $settings.Dock = 'Fill'; $settings.ColumnCount = 3; $settings.RowCount = 2
-    $settings.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Absolute', 155)))
-    $settings.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent', 100)))
-    $settings.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Absolute', 160)))
+    [void]$settings.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Absolute', 155)))
+    [void]$settings.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent', 100)))
+    [void]$settings.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Absolute', 160)))
     $layout.Controls.Add($settings, 0, 1)
     $rootBox = New-Object Windows.Forms.TextBox; $rootBox.ReadOnly = $true; $rootBox.Dock = 'Fill'; $rootBox.Text = $data.Root
     $architecture = New-Object Windows.Forms.ComboBox; $architecture.DropDownStyle = 'DropDownList'; $architecture.Items.AddRange(@('x64','ARM64')); $architecture.SelectedItem = $data.Config.Architecture
@@ -451,7 +459,7 @@ function Show-PDConfiguration {
     $clientsTab = New-Object Windows.Forms.TabPage; $clientsTab.Text = 'Clients and inventories'
     $tabs.TabPages.AddRange(@($printersTab, $cleanupTab, $clientsTab, $gpoTab))
     $printerLayout = New-Object Windows.Forms.TableLayoutPanel; $printerLayout.Dock = 'Fill'; $printerLayout.ColumnCount = 1; $printerLayout.RowCount = 2
-    $printerLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Percent', 100))); $printerLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', 48)))
+    [void]$printerLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Percent', 100))); [void]$printerLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', 48)))
     $printersTab.Controls.Add($printerLayout)
     $grid = New-Object Windows.Forms.DataGridView
     $grid.Dock = 'Fill'; $grid.ReadOnly = $true; $grid.AllowUserToAddRows = $false; $grid.AllowUserToDeleteRows = $false
@@ -464,11 +472,11 @@ function Show-PDConfiguration {
     $printerLayout.Controls.Add($grid, 0, 0)
     $printerButtons = New-Object Windows.Forms.FlowLayoutPanel; $printerButtons.Dock = 'Fill'; $printerLayout.Controls.Add($printerButtons, 0, 1)
     $cleanupLayout = New-Object Windows.Forms.TableLayoutPanel; $cleanupLayout.Dock = 'Fill'; $cleanupLayout.ColumnCount = 1; $cleanupLayout.RowCount = 5
-    $cleanupLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', 64)))
-    $cleanupLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', 40)))
-    $cleanupLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', 42)))
-    $cleanupLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', 40)))
-    $cleanupLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Percent', 100)))
+    [void]$cleanupLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', 64)))
+    [void]$cleanupLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', 40)))
+    [void]$cleanupLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', 42)))
+    [void]$cleanupLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute', 40)))
+    [void]$cleanupLayout.RowStyles.Add((New-Object Windows.Forms.RowStyle('Percent', 100)))
     $cleanupTab.Controls.Add($cleanupLayout)
     $cleanupHelp = New-PDLabel 'Cleanup runs before installing the configured queues. Listed names are exact matches and can be removed on every run. Preview with -WhatIf before applying.'
     $cleanupHelp.MaximumSize = '880,0'; $cleanupLayout.Controls.Add($cleanupHelp, 0, 0)
@@ -604,6 +612,12 @@ function Show-PDConfiguration {
         if ($data.Dirty -and [Windows.Forms.MessageBox]::Show('Close without saving configuration changes?', 'Unsaved changes', 'YesNo', 'Question') -ne 'Yes') { $eventArgs.Cancel = $true }
     }.GetNewClosure())
     & $loadCleanup; & $refresh; $data.Dirty = $false
+    return $form
+}
+
+function Show-PDConfiguration {
+    param([string]$ConfigPath, [string]$SourceRoot)
+    $form = New-PDConfigurationForm -ConfigPath $ConfigPath -SourceRoot $SourceRoot
     try { [void]$form.ShowDialog() } finally { $form.Dispose() }
 }
 

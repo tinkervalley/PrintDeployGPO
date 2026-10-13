@@ -171,6 +171,8 @@ The dependency-free tests parse every PowerShell source, exercise INF detection,
 
 The client tests also cover before/after report uploads, error reporting, one-time removal receipts, computer/user scoping, changed-queue protection, corrupt report handling and local report retention when uploading fails. Pilot the NTFS log-folder permissions and SMB access on a Windows file server with actual computer and user accounts.
 
+On Windows PowerShell 5.1, run `powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\tests\Run-GuiSmoke.ps1` for GUI smoke checks. These construct the main window, client panel and printer editor using real Windows Forms, verify that each factory returns only its control, switch connection types, and load a saved configuration. No dialogs are displayed and no printers are installed. GitHub Actions runs both suites on Windows after each push. This checks construction and basic control behavior; visual layout and real printer installation still require a Windows pilot.
+
 ## Microsoft references
 
 - [Add-Printer and its IPP parameter set](https://learn.microsoft.com/en-us/powershell/module/printmanagement/add-printer)

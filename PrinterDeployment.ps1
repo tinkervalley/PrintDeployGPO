@@ -3,7 +3,7 @@
 .SYNOPSIS
 Configures or silently deploys machine-wide IPP and Type 4 printers.
 .EXAMPLE
-powershell.exe -NoProfile -STA -File .\PrinterDeployment.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\PrinterDeployment.ps1
 .EXAMPLE
 powershell.exe -NoProfile -NonInteractive -File .\PrinterDeployment.ps1 -Mode Deploy -ConfigPath \\server\Printers\printers.json -WhatIf
 #>

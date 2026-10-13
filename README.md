@@ -7,7 +7,7 @@ A Windows PowerShell 5.1 tool with a Windows Forms configuration GUI and a silen
 1. Copy this project to a Windows administrator workstation. Run `Launch-Configurator.cmd`, or:
 
    ```powershell
-   powershell.exe -NoProfile -STA -File .\PrinterDeployment.ps1
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\PrinterDeployment.ps1
    ```
 
 2. Choose a deployment folder, ideally a dedicated UNC path such as `\\fileserver\Software\Printers`. A local folder is allowed for staging. Use a UNC path when creating the GPO; mapped drives are unavailable to SYSTEM.
@@ -17,6 +17,10 @@ A Windows PowerShell 5.1 tool with a Windows Forms configuration GUI and a silen
 6. Configure cleanup if needed, validate, then **Save deployment bundle**. This also exports `Install-PrinterDeploymentTask.ps1`, a standalone GPO startup script that registers the deployment task. The GPO deployment tab explains how to install it. Save writes the configuration last, after copying the scripts and resources.
 
 Configuration does not install printers on the administrator workstation. The GUI requires write access to the deployment folder but does not itself require elevation. Changing folders copies configured packages and keeps the original bundle. Opening an existing `printers.json` preserves its deployment identity. Preserve that identity across updates so local ownership records continue to work.
+
+The GUI launcher sets `-ExecutionPolicy Bypass` for that PowerShell process only. This lets the downloaded application open on workstations with the default Restricted execution policy, without changing CurrentUser or LocalMachine settings. A policy enforced through Group Policy still takes precedence. The generated GPO task and startup script continue to follow your organization's deployment execution policy.
+
+If Windows still reports **running scripts is disabled on this system**, run `Get-ExecutionPolicy -List` in Windows PowerShell. If `MachinePolicy` or `UserPolicy` is Restricted, your administrator must permit execution through **Administrative Templates > Windows Components > Windows PowerShell > Turn on Script Execution**. If policy requires AllSigned, sign the entry script, its PowerShell modules and the generated startup script with a trusted certificate. A process-level option cannot override these managed policies. See [Microsoft's execution-policy guidance](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies?view=powershell-5.1).
 
 The resulting folder contains:
 
@@ -96,7 +100,7 @@ Configure the task to run on the intended computers. The deployment script also 
 
 A **computer startup script** is a simpler alternative on always-connected desktops: **Computer Configuration > Policies > Windows Settings > Scripts (Startup/Shutdown) > Startup > PowerShell Scripts**. Use the UNC script name and parameters `-Mode Deploy -ConfigPath "\\fileserver\Software\Printers\printers.json"`. Enable **Always wait for the network at computer startup and logon**. Startup runs as SYSTEM, which has permission to register drivers. A user logon script is unsuitable for driver installation.
 
-Give reporting computer accounts (typically **Domain Computers**) **Change** at the SMB share level, but only **Read/Execute** on the deployment root, scripts, drivers and `printers.json` at the NTFS level. Reporting users need the same combination if the user-logon mode is deployed. Effective permissions combine share and NTFS permissions: the share-level Change permission allows writes that NTFS permits inside `Client Logs`; it must not be accompanied by NTFS write access to the deployment files. Restrict modification of those files to deployment administrators. Use script signing and the execution policy required by your organization. The launch commands intentionally do not override execution policy.
+Give reporting computer accounts (typically **Domain Computers**) **Change** at the SMB share level, but only **Read/Execute** on the deployment root, scripts, drivers and `printers.json` at the NTFS level. Reporting users need the same combination if the user-logon mode is deployed. Effective permissions combine share and NTFS permissions: the share-level Change permission allows writes that NTFS permits inside `Client Logs`; it must not be accompanied by NTFS write access to the deployment files. Restrict modification of those files to deployment administrators. Use script signing and the execution policy required by your organization. Deployment commands follow that policy; only the interactive GUI launcher sets a process-level Bypass policy.
 
 Windows Protected Print Mode blocks third-party printer drivers. A mixed IPP/Type4 deployment therefore requires a policy compatible with the Type4 printers; the tool does not change that policy. An existing same-name driver of Type 3 is rejected, and a driver-staging reboot requirement returns failure before cleanup so the task can retry after a restart.
 

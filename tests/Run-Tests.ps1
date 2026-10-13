@@ -58,7 +58,7 @@ Vendor="Test Vendor"
 Model="Test Printer v4"
 '@ | Set-Content -LiteralPath $inf -Encoding Unicode
     Test-Case 'All PowerShell files parse' {
-        foreach ($file in @(Get-ChildItem -LiteralPath $projectRoot -Recurse -Include '*.ps1','*.psm1')) {
+        foreach ($file in @(Get-ChildItem -LiteralPath $projectRoot -Recurse -File | Where-Object { $_.Extension -in @('.ps1','.psm1') })) {
             $tokens = $null; $errors = $null
             [void][Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
             Assert-True (-not $errors) ("Syntax errors in $($file.Name): " + ($errors -join '; '))

@@ -20,5 +20,6 @@ jobs:
         shell: powershell
         run: .\tests\Run-Tests.ps1
       - name: Construct real Windows Forms controls
+        if: always()
         shell: powershell
         run: .\tests\Run-GuiSmoke.ps1

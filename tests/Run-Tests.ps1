@@ -64,6 +64,22 @@ Model="Test Printer v4"
             Assert-True (-not $errors) ("Syntax errors in $($file.Name): " + ($errors -join '; '))
         }
     }
+    Test-Case 'Entry point resolves default config beside the script from another working folder' {
+        $fixture=Join-Path $tempRoot 'Entry point with spaces'; $fixtureModules=Join-Path $fixture 'Modules'
+        New-Item -ItemType Directory -Path $fixtureModules -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $projectRoot 'PrinterDeployment.ps1') -Destination $fixture
+        Copy-Item -LiteralPath (Join-Path $projectRoot 'Modules/PrinterDeployment.Core.psm1') -Destination $fixtureModules
+        Copy-Item -LiteralPath (Join-Path $projectRoot 'examples/printers.ipp.json') -Destination (Join-Path $fixture 'printers.json')
+        $hostExecutable=(Get-Process -Id $PID).Path
+        $entry=Join-Path $fixture 'PrinterDeployment.ps1'
+        Push-Location $tempRoot
+        try {
+            $output=& $hostExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -Mode Validate 2>&1
+            Assert-True ($LASTEXITCODE -eq 0 -and ($output -join ' ') -match 'resources|packaged driver models are valid') ('Default path startup failed: ' + ($output -join ' '))
+            $output=& $hostExecutable -NoProfile -ExecutionPolicy Bypass -File $entry -Mode Validate -ConfigPath (Join-Path $fixture 'printers.json') 2>&1
+            Assert-True ($LASTEXITCODE -eq 0) ('Explicit path startup failed: ' + ($output -join ' '))
+        } finally { Pop-Location }
+    }
     Test-Case 'UTF-16 Type 4 INF, strings, comments and architecture filtering' {
         $models = @(Get-PDInfModels $inf x64)
         Assert-True ($models.Count -eq 3) 'Expected three x64 models.'

@@ -1,0 +1,14 @@
+# Host metadata and PowerShell runtime caches
+.DS_Store
+StartupProfileData-*
+
+# Real deployment resources and client inventories stay out of the public source repository.
+/printers.json
+/Drivers/
+/Client Logs/
+/GPO-Setup.txt
+/Install-PrinterDeploymentTask.ps1
+
+# Local diagnostics and temporary files
+*.log
+*.tmp

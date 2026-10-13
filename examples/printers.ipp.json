@@ -1,0 +1,23 @@
+{
+  "SchemaVersion": 1,
+  "DeploymentId": "7f403015-cb31-40f3-b26a-2bfda2312825",
+  "Architecture": "x64",
+  "Cleanup": {
+    "RemoveStaleManaged": false,
+    "LegacyPrinterNames": [],
+    "CleanupUserConnections": false
+  },
+  "Printers": [
+    {
+      "Name": "Main Office",
+      "Kind": "IPP",
+      "Address": "ipp://printer.example.com:631/ipp/print",
+      "PortNumber": 9100,
+      "Location": "Main Office",
+      "Comment": "Managed by IT",
+      "PackagePath": "",
+      "InfPath": "",
+      "DriverName": ""
+    }
+  ]
+}

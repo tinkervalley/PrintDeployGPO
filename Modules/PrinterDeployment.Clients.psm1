@@ -1,0 +1,172 @@
+Set-StrictMode -Version 2.0
+Import-Module (Join-Path $PSScriptRoot 'PrinterDeployment.Core.psm1')
+
+function Get-PDClientIdentity {
+    param([ValidateSet('Machine','UserConnection')][string]$Scope = 'Machine')
+    $computer = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { [Environment]::MachineName }
+    $sid = ''; $name = 'SYSTEM'
+    if ($Scope -eq 'UserConnection') {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $sid = $identity.User.Value; $name = $identity.Name
+    }
+    [pscustomobject]@{ ComputerName=$computer.ToUpperInvariant(); Scope=$Scope; UserSid=$sid; UserName=$name }
+}
+
+function Get-PDClientFolderName {
+    param($Identity)
+    if ($Identity.ComputerName -notmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,62}$') { throw 'Invalid reporting computer name.' }
+    if ($Identity.Scope -eq 'Machine' -and $Identity.UserSid -eq '') { return $Identity.ComputerName.ToUpperInvariant() }
+    if ($Identity.Scope -ne 'UserConnection' -or $Identity.UserSid -notmatch '^S-1-\d+(-\d+)+$') { throw 'Invalid reporting user identity.' }
+    $Identity.ComputerName.ToUpperInvariant() + '--user-' + (Get-PDHash $Identity.UserSid).Substring(0,16)
+}
+
+function Get-PDConfigurationHash {
+    param($Config)
+    # Normalize JSON date handling so a GUI-created request and its saved/read copy agree.
+    $normalized = $Config | ConvertTo-Json -Depth 12 -Compress | ConvertFrom-Json
+    Get-PDHash ($normalized | ConvertTo-Json -Depth 12 -Compress)
+}
+
+function Get-PDClientRemovalRequests {
+    param($Config, $Identity)
+    if (-not $Config.PSObject.Properties['ClientRemovals']) { return }
+    @($Config.ClientRemovals | Where-Object {
+        $_.ComputerName -eq $Identity.ComputerName -and $_.Scope -eq $Identity.Scope -and $_.UserSid -eq $Identity.UserSid
+    })
+}
+
+function Set-PDClientRemovalSelection {
+    param($Config, $Report, $Printer, [bool]$Selected)
+    if ($Report.DeploymentId -ne $Config.DeploymentId) { throw 'This report belongs to a different deployment.' }
+    [void](Get-PDClientFolderName $Report)
+    if ($Report.Scope -eq 'UserConnection' -and $Printer.Type -ne 'Connection') { throw 'User-logon cleanup can only remove user connections. Use a machine report for machine queues.' }
+    if ($Report.Scope -eq 'Machine' -and $Printer.Type -eq 'Connection') { throw 'Select this connection from its user report instead.' }
+    if ($Printer.Name -in @($Config.Printers | ForEach-Object { $_.Name })) { throw 'Remove this printer from the desired configuration before scheduling its removal.' }
+    if (-not $Config.PSObject.Properties['ClientRemovals']) { $Config | Add-Member -NotePropertyName ClientRemovals -NotePropertyValue @() }
+    $others = @($Config.ClientRemovals | Where-Object {
+        -not ($_.ComputerName -eq $Report.ComputerName -and $_.Scope -eq $Report.Scope -and $_.UserSid -eq $Report.UserSid -and $_.Name -eq $Printer.Name)
+    })
+    $existing = @(Get-PDClientRemovalRequests $Config $Report | Where-Object { $_.Name -eq $Printer.Name })
+    if ($Selected) {
+        # Preserve a request ID until explicitly cleared, so completed requests remain one-shot.
+        $request = if ($existing.Count) { $existing[0] } else {
+            [pscustomobject]@{ Id=[guid]::NewGuid().ToString(); ComputerName=$Report.ComputerName; Scope=$Report.Scope; UserSid=$Report.UserSid
+                Name=$Printer.Name; DriverName=$Printer.DriverName; PortName=$Printer.PortName; RequestedAt=(Get-Date).ToUniversalTime().ToString('o') }
+        }
+        $others += @($request)
+    }
+    $Config.ClientRemovals = $others
+}
+
+function New-PDClientReport {
+    param($Config, $Identity, [object[]]$Before = @(), [object[]]$After = @(), [object[]]$RemovalResults = @(),
+        [string]$Result, [string]$ErrorMessage = '', [string]$InventoryError = '', [string]$StartedAt,
+        [hashtable]$Records = @{}, [string]$RunId = ([guid]::NewGuid().ToString()))
+    $wanted = @($Config.Printers | ForEach-Object { $_.Name })
+    $printers = @($After | ForEach-Object {
+        [pscustomobject]@{ Name=[string]$_.Name; Type=[string]$_.Type; DriverName=[string]$_.DriverName; PortName=[string]$_.PortName
+            Location=[string]$_.Location; Configured=($_.Name -in $wanted) }
+    })
+    $verification = @()
+    if ($Identity.Scope -eq 'Machine') {
+        $verification = @($Config.Printers | ForEach-Object {
+            $p = $_; $actual = @($After | Where-Object { $_.Name -eq $p.Name })
+            $status = 'Missing'
+            if ($InventoryError) { $status = 'Unknown' }
+            elseif ($actual.Count -eq 1) {
+                $driver = if ($p.Kind -eq 'IPP') { 'Microsoft IPP Class Driver' } else { $p.DriverName }
+                $status = 'Needs reconciliation'
+                if ($actual[0].DriverName -eq $driver -and $Records.ContainsKey($p.Name) -and
+                    $Records[$p.Name].Fingerprint -eq (Get-PDPrinterFingerprint $p) -and
+                    $Records[$p.Name].PortName -eq $actual[0].PortName -and $Records[$p.Name].DriverName -eq $actual[0].DriverName) { $status = 'Installed' }
+            }
+            [pscustomobject]@{ Name=$p.Name; Status=$status }
+        })
+        if ($Result -eq 'Success' -and @($verification | Where-Object { $_.Status -ne 'Installed' }).Count) {
+            $Result = 'Failed'
+            if (-not $ErrorMessage) { $ErrorMessage = 'One or more desired printers failed final inventory verification.' }
+        }
+    }
+    [pscustomobject][ordered]@{
+        SchemaVersion=1; DeploymentId=$Config.DeploymentId; ComputerName=$Identity.ComputerName; Scope=$Identity.Scope
+        UserSid=$Identity.UserSid; UserName=$Identity.UserName; RunId=$RunId; StartedAt=$StartedAt
+        ReportedAt=(Get-Date).ToUniversalTime().ToString('o'); Result=$Result; ErrorMessage=$ErrorMessage; InventoryError=$InventoryError
+        ConfigurationHash=(Get-PDConfigurationHash $Config)
+        Before=@($Before | Select-Object Name,Type,DriverName,PortName); Printers=$printers
+        ConfiguredPrinters=$verification; RemovalResults=@($RemovalResults)
+    }
+}
+
+function Write-PDClientReport {
+    param([string]$Root, $Report)
+    $folder = Get-PDClientFolderName $Report
+    $relative = 'Client Logs\' + $folder
+    $destination = Resolve-PDResource $Root $relative
+    New-Item -ItemType Directory -Path $destination -Force | Out-Null
+    $run = [guid]::Empty
+    if (-not [guid]::TryParse($Report.RunId, [ref]$run)) { throw 'Invalid report run ID.' }
+    $timestamp = ([datetimeoffset]::Parse($Report.ReportedAt)).UtcDateTime.ToString('yyyyMMdd-HHmmss-fff')
+    Write-PDJson $Report (Resolve-PDResource $Root ($relative + '\' + $timestamp + '-' + $run.ToString('N') + '.json'))
+    Write-PDJson $Report (Resolve-PDResource $Root ($relative + '\latest.json'))
+}
+
+function Get-PDClientReports {
+    [CmdletBinding()]
+    param([string]$Root, [string]$DeploymentId)
+    $logs = Resolve-PDResource $Root 'Client Logs'
+    if (-not (Test-Path -LiteralPath $logs)) { return }
+    foreach ($folder in @(Get-ChildItem -LiteralPath $logs -Directory)) {
+        try {
+            $path = Resolve-PDResource $Root ('Client Logs\' + $folder.Name + '\latest.json')
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+            if ((Get-Item -LiteralPath $path).Length -gt 4MB) { throw 'Report exceeds the 4 MB size limit.' }
+            $report = Read-PDConfiguration $path
+            if ($report.DeploymentId -ne $DeploymentId) { continue }
+            if ($report.SchemaVersion -ne 1 -or (Get-PDClientFolderName $report) -ne $folder.Name -or
+                $report.Result -notin @('Success','Failed') -or $report.Printers -isnot [array] -or
+                $report.ConfiguredPrinters -isnot [array] -or $report.RemovalResults -isnot [array]) { throw 'Unsupported report format.' }
+            # ConvertFrom-Json can materialize ISO timestamps as DateTime objects.
+            foreach ($field in @('ReportedAt','StartedAt')) {
+                if ($report.$field -is [datetime] -or $report.$field -is [datetimeoffset]) { $report.$field = ([datetimeoffset]$report.$field).ToString('o') }
+            }
+            [void][datetimeoffset]::Parse($report.ReportedAt)
+            foreach ($field in @('UserName','ReportedAt','StartedAt','ErrorMessage','InventoryError','ConfigurationHash')) {
+                if ($report.$field -isnot [string]) { throw 'Invalid report metadata.' }
+            }
+            if ($report.ConfigurationHash -notmatch '^[0-9a-f]{64}$') { throw 'Invalid report configuration revision.' }
+            foreach ($p in $report.Printers) {
+                foreach ($field in @('Name','Type','DriverName','PortName','Location')) { if ($p.$field -isnot [string]) { throw 'Invalid printer inventory.' } }
+            }
+            foreach ($p in $report.ConfiguredPrinters) {
+                if ($p.Name -isnot [string] -or $p.Status -notin @('Installed','Missing','Unknown','Needs reconciliation')) { throw 'Invalid configured-printer result.' }
+            }
+            foreach ($result in $report.RemovalResults) {
+                $id=[guid]::Empty
+                if (-not [guid]::TryParse([string]$result.Id,[ref]$id) -or $result.Name -isnot [string] -or $result.Message -isnot [string] -or
+                    $result.Status -notin @('Pending','Completed','Changed','Removed','NotFound','Planned','Failed')) { throw 'Invalid removal result.' }
+            }
+            $report
+        } catch { Write-Warning "Skipped client report '$($folder.Name)': $($_.Exception.Message)" }
+    }
+}
+
+function Set-PDClientLogPermissions {
+    param([string]$Root)
+    if ($env:OS -ne 'Windows_NT') { throw 'Configure report permissions from Windows.' }
+    $folder = Resolve-PDResource $Root 'Client Logs'
+    New-Item -ItemType Directory -Path $folder -Force | Out-Null
+    $acl = New-Object Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @('S-1-5-18','S-1-5-32-544', [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)) {
+        $identity = New-Object Security.Principal.SecurityIdentifier($sid)
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($identity,'FullControl','ContainerInherit,ObjectInherit','None','Allow')))
+    }
+    $authenticated = New-Object Security.Principal.SecurityIdentifier('S-1-5-11')
+    $creator = New-Object Security.Principal.SecurityIdentifier('S-1-3-0')
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($authenticated,'ReadAndExecute','ContainerInherit,ObjectInherit','None','Allow')))
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($authenticated,'CreateDirectories','None','None','Allow')))
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($creator,'Modify','ContainerInherit,ObjectInherit','InheritOnly','Allow')))
+    Set-Acl -LiteralPath $folder -AclObject $acl
+}
+
+Export-ModuleMember -Function *-PD*

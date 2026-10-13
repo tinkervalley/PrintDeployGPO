@@ -349,7 +349,10 @@ Model="Test Printer v4"
     $module = Get-Module PrinterDeployment.Deploy
     Test-Case 'Packaged driver registration checks Type 3/4 versions, stages and verifies exact INF' {
         & $module {
-            param($InfPath,$Root)
+            param($InfPath,$Root,[scriptblock]$Check,[scriptblock]$ExpectFailure)
+            # Windows PowerShell modules cannot resolve test helpers in the calling script scope.
+            Set-Item Function:Assert-True -Value $Check
+            Set-Item Function:Assert-Throws -Value $ExpectFailure
             $script:PDLogPath=$null; $script:PDDriverMock=@{ Driver=$null; Stages=0; Registered=0; MajorVersion=3; StageCode=0; Inf=$InfPath }
             function script:Import-Module { [CmdletBinding()]param($Name) }
             function script:Get-PrinterDriver { [CmdletBinding()]param() if ($script:PDDriverMock.Driver) { $script:PDDriverMock.Driver } }
@@ -366,7 +369,7 @@ Model="Test Printer v4"
             Assert-Throws { Install-PDPackagedDriver $printer $Root } 'Type 3 driver registration failed'
             $script:PDDriverMock.Driver=$null; $script:PDDriverMock.StageCode=3010
             Assert-Throws { Install-PDPackagedDriver $printer $Root } 'requires a restart'
-        } (Join-Path $packagePath 'type3-valid.inf') $tempRoot
+        } (Join-Path $packagePath 'type3-valid.inf') $tempRoot (Get-Command Assert-True).ScriptBlock (Get-Command Assert-Throws).ScriptBlock
     }
     $global:PDMock = @{ Printers = @(); Ports = @(); Events = (New-Object 'System.Collections.Generic.List[string]'); DriverFailure = $false; IppFailure = $false; ComputerName='PC001'; UserSid='S-1-5-21-100-100-100-1100'; UploadFailure=$false }
     & $module {

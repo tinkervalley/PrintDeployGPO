@@ -16,6 +16,11 @@ function Get-GuiChildren {
     param([System.Windows.Forms.Control]$Parent)
     foreach ($child in $Parent.Controls) { $child; Get-GuiChildren $child }
 }
+function Invoke-GuiButton {
+    param([System.Windows.Forms.Button]$Button)
+    $method=$Button.GetType().GetMethod('OnClick',[Reflection.BindingFlags]'Instance,NonPublic')
+    [void]$method.Invoke($Button,@([EventArgs]::Empty))
+}
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ('pdt-gui-' + [guid]::NewGuid().ToString('N'))
 $forms = New-Object 'System.Collections.Generic.List[System.Windows.Forms.Form]'
 try {
@@ -45,8 +50,48 @@ try {
     $port = @($editorChildren | Where-Object { $_ -is [System.Windows.Forms.NumericUpDown] })[0]
     Assert-Gui (-not $port.Enabled) 'IPP mode did not disable RAW port controls.'
     $kind.SelectedItem = 'Type4'
-    Assert-Gui ($port.Enabled) 'Type 4 mode did not enable RAW port controls.'
+    Assert-Gui ($port.Enabled -and $port.Value -eq 9100) 'Type 4 mode did not use the RAW port default.'
+    $kind.SelectedItem='Type3'
+    Assert-Gui ($port.Enabled -and $port.Value -eq 9100) 'Type 3 RAW controls unavailable.'
+    $kind.SelectedItem='IPP'
+    Assert-Gui (-not $port.Enabled -and $port.Value -eq 631) 'Switching back to IPP changed its default port.'
     Write-Host 'PASS Printer editor constructs and switches between IPP and Type 4.'
+
+    $newEditor=New-PDPrinterEditorForm -Root $tempRoot -Architecture x64 -Owner $form; $forms.Add($newEditor)
+    $fields=@(Get-GuiChildren $newEditor)
+    ($fields | Where-Object { $_.Name -eq 'PrinterName' }).Text='New IPP'
+    ($fields | Where-Object { $_.Name -eq 'PrinterHost' }).Text='192.0.2.55'
+    $protocol=($fields | Where-Object { $_.Name -eq 'IppProtocol' }); $protocol.SelectedItem='ipps'
+    Assert-Gui (($fields | Where-Object { $_.Name -eq 'IppSubpath' }).Text -eq '/ipp') 'Default subpath missing.'
+    Invoke-GuiButton ($fields | Where-Object { $_ -is [System.Windows.Forms.Button] -and $_.Text -eq 'Save printer' })
+    Assert-Gui ($newEditor.Tag.Result.Address -eq 'ipps://192.0.2.55:631/ipp') 'GUI did not build the IPPS URL.'
+    Write-Host 'PASS IPP editor saves an address from host/protocol/default subpath.'
+
+    $sample=Read-PDConfiguration (Join-Path $projectRoot 'examples\printers.ipp.json')
+    foreach ($savedAddress in @('ipp://PRINTER.example.com/ipp/print','ipps://printer.example.com:443/ipp/print','https://printer.example.com/ipp/print?queue=1')) {
+        $sample.Printers[0].Address=$savedAddress
+        $edit=New-PDPrinterEditorForm -Printer $sample.Printers[0] -Root $tempRoot -Architecture x64 -Owner $form; $forms.Add($edit)
+        $fields=@(Get-GuiChildren $edit)
+        Invoke-GuiButton ($fields | Where-Object { $_ -is [System.Windows.Forms.Button] -and $_.Text -eq 'Save printer' })
+        Assert-Gui ($edit.Tag.Result.Address -ceq $savedAddress) 'Unchanged editing rewrote the saved URI.'
+    }
+    Write-Host 'PASS Existing IPP/custom-port/HTTPS addresses are preserved on unchanged edits.'
+
+    $local=[pscustomobject]@{ Name='Computer queue'; Type='Local'; DriverName='Class'; PortName='IPP'; Location='' }
+    $shared=[pscustomobject]@{ Name='\\domain\printer'; Type='Connection'; DriverName='Legacy'; PortName='UNC'; Location='' }
+    $data.Config=New-PDConfiguration
+    $machine=New-PDClientReport -Config $data.Config -Identity ([pscustomobject]@{ ComputerName='PC001'; Scope='Machine'; UserSid=''; UserName='SYSTEM' }) -After @($local) -Result Success -StartedAt (Get-Date -Format o)
+    $user=New-PDClientReport -Config $data.Config -Identity ([pscustomobject]@{ ComputerName='PC001'; Scope='UserConnection'; UserSid='S-1-5-21-1-2-3-1001'; UserName='DOMAIN\Alice' }) -After @($local,$shared) -Result Success -StartedAt (Get-Date -Format o)
+    Write-PDClientReport $tempRoot $machine; Write-PDClientReport $tempRoot $user
+    $clientFields=@(Get-GuiChildren $clientPanel[0])
+    Invoke-GuiButton ($clientFields | Where-Object { $_ -is [System.Windows.Forms.Button] -and $_.Text -eq 'Refresh computers' })
+    $computerGrid=($clientFields | Where-Object { $_ -is [System.Windows.Forms.DataGridView] -and $_.Columns.Contains('Computer') })
+    $printerGrid=($clientFields | Where-Object { $_ -is [System.Windows.Forms.DataGridView] -and $_.Columns.Contains('Remove') })
+    Assert-Gui ($computerGrid.Rows.Count -eq 1 -and $printerGrid.Rows.Count -eq 2) 'Combined computer/user GUI did not deduplicate local queues.'
+    $userRow=@($printerGrid.Rows | Where-Object { $_.Tag.Report.Scope -eq 'UserConnection' })[0]
+    $userRow.Cells['Remove'].Value=$true
+    Assert-Gui ($data.Config.ClientRemovals.Count -eq 1 -and $data.Config.ClientRemovals[0].UserSid -eq $user.UserSid) 'Combined inventory selection targeted the wrong context.'
+    Write-Host 'PASS Combined inventory displays one computer and routes user removals correctly.'
 
     $config = New-PDConfiguration
     $sample = Read-PDConfiguration (Join-Path $projectRoot 'examples\printers.ipp.json')
@@ -59,7 +104,7 @@ try {
     $grids = @(Get-GuiChildren $loaded[0] | Where-Object { $_ -is [System.Windows.Forms.DataGridView] })
     Assert-Gui (@($grids | Where-Object { $_.Columns.Contains('Address') -and $_.Rows.Count -eq 1 }).Count -eq 1) 'Saved printer did not populate the main GUI.'
     Write-Host 'PASS Existing configuration populates the printer grid.'
-    Write-Host 'All 4 Windows PowerShell GUI smoke checks passed.'
+    Write-Host 'All 7 Windows PowerShell GUI smoke checks passed.'
 } finally {
     foreach ($form in $forms) { $form.Dispose() }
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue

@@ -1,6 +1,6 @@
 # PrintDeployGPO
 
-A Windows PowerShell 5.1 tool with a Windows Forms configuration GUI and a silent, repeatable GPO deployment mode. It installs machine-wide queues for all users, without a print server. There are no external PowerShell module dependencies beyond the Windows inbox PrintManagement and DISM modules.
+A Windows PowerShell 5.1 tool with a Windows Forms configuration GUI and a silent, repeatable GPO deployment mode. It installs machine-wide queues for all users, without a print server. Supports driverless IPP/IPPS and signed Type 3/Type 4 TCP/IP driver packages. There are no external PowerShell module dependencies beyond the Windows inbox PrintManagement and DISM modules.
 
 ## Configure
 
@@ -12,9 +12,9 @@ A Windows PowerShell 5.1 tool with a Windows Forms configuration GUI and a silen
 
 2. Choose a deployment folder, ideally a dedicated UNC path such as `\\fileserver\Software\Printers`. A local folder is allowed for staging. Use a UNC path when creating the GPO; mapped drives are unavailable to SYSTEM.
 3. Choose the target architecture, x64 or ARM64. Use a separate configuration/share subfolder for each architecture. Run the native 64-bit PowerShell host on clients.
-4. Add an **IPP** printer using the full URL from its documentation, for example `ipp://10.20.30.40:631/ipp/print` or `ipps://printer.example.com:443/ipp/print`. The resource path and port are printer-specific. IPPS requires a certificate the client trusts and a hostname matching that certificate.
-5. For a **Type4** printer, enter its IP address/hostname and RAW TCP port (usually 9100). Choose **Import driver package**, select the complete extracted vendor package folder, then an INF inside that folder. The tool copies the entire folder into `Drivers\<unique-id>`, preserving manifests, catalogs, binaries and subfolders. Choose the exact detected driver name from the dropdown. EXE/MSI/ZIP packages must be extracted first.
-6. Configure cleanup if needed, validate, then **Save deployment bundle**. This also exports `Install-PrinterDeploymentTask.ps1`, a standalone GPO startup script that registers the deployment task. The GPO deployment tab explains how to install it. Save writes the configuration last, after copying the scripts and resources.
+4. Add an **IPP** printer by entering only its IP address or hostname, choosing **ipp** or **ipps**, and entering its subpath (default `/ipp`). The GUI builds the full URL and uses port **631** automatically for either protocol. Enable **Use custom port** for a printer advertising a different port, such as IPPS on 443. A leading slash is added to the subpath if omitted. IPv6 addresses work with or without brackets. Existing saved URLs, including custom ports and HTTP(S) schemes, are preserved when editing without endpoint changes. IPPS requires a trusted certificate matching the hostname. The correct resource path is printer-specific.
+5. For a **Type3** or **Type4** printer, enter its IP address/hostname and RAW TCP port (usually 9100). Choose **Import driver package**, select the complete extracted vendor package folder, then an INF inside that folder. The tool copies the entire folder into `Drivers\<unique-id>`, preserving manifests, catalogs, binaries and subfolders. Choose the exact detected driver name from the dropdown. EXE/MSI/ZIP packages must be extracted first.
+6. Configure cleanup if needed, validate, then **Save deployment bundle**. This exports `Install-PrinterDeploymentTask.ps1` for Computer Startup (one SYSTEM task) and `Report-UserPrinters.ps1` for User Logon (no additional task). Both accept blank GPO parameters. Deploy the user logon script to collect old shared-printer connections and apply selected user removals. The GPO deployment tab explains how to install it. Save writes the configuration last, after copying the scripts and resources.
 
 Configuration does not install printers on the administrator workstation. The GUI requires write access to the deployment folder but does not itself require elevation. Changing folders copies configured packages and keeps the original bundle. Opening an existing `printers.json` preserves its deployment identity. Preserve that identity across updates so local ownership records continue to work.
 
@@ -29,6 +29,7 @@ Printers\
   PrinterDeployment.ps1
   Launch-Configurator.cmd
   Install-PrinterDeploymentTask.ps1
+  Report-UserPrinters.ps1
   printers.json
   GPO-Setup.txt
   README.md
@@ -47,7 +48,7 @@ Printers\
 
 Package paths in JSON are relative to this folder. Validation rejects absolute resource paths, traversal, missing packages, symbolic links/junctions, unsupported drivers, duplicate queue names and cleanup names that conflict with configured printers. Cancelled imports may leave unreferenced package folders; these are not deployed. The tool does not delete unused packages automatically.
 
-The INF reader supports neutral/en-US string tables, quoted names, comments, continuations and manufacturer model sections for the selected architecture, including OS-decorated sections. The dropdown is a list of candidate model names; Windows still decides whether a model's OS decoration applies on a particular client. Localized-only or unusually structured vendor INFs may need a different vendor package. The INF must declare `Class=Printer` and `ClassVer=4.0`. Windows independently enforces package signatures and compatibility during installation.
+The INF reader supports neutral/en-US string tables, quoted names, comments, continuations and manufacturer model sections for the selected architecture, including OS-decorated sections. The dropdown is a list of candidate model names; Windows still decides whether a model's OS decoration applies on a particular client. Localized-only or unusually structured vendor INFs may need a different vendor package. All packaged INFs must declare `Class=Printer`. Type 4 requires `ClassVer=4.0`; Type 3 accepts an absent `ClassVer` or `ClassVer=3.0` and rejects Type 4 packages. Select the corresponding type explicitly before importing. Changing between Type 3 and Type 4 clears the package selection so the wrong package cannot be reused. Vendor EXE/MSI installers and co-installer workflows are not executed. Windows independently enforces package signatures and compatibility during installation.
 
 ## Pilot before rolling out
 
@@ -64,9 +65,9 @@ $bundle = '\\fileserver\Software\Printers'
 
 IPP uses `Add-Printer -IppURL`; Windows creates the IPP port through directed discovery. `DriverName` cannot be combined with `IppURL` in that command's parameter set. After discovery the tool checks the queue and, if necessary, selects **Microsoft IPP Class Driver**. The printer must support the Windows IPP/Mopria printing path. Capability detection fails before cleanup if the Windows build does not expose `IppURL`.
 
-Type 4 deployment first checks `Get-PrinterDriver`. An existing driver of that exact name must have `MajorVersion=4`. Otherwise the tool stages the selected INF with `pnputil /add-driver`, locates the matching INF in the Driver Store using DISM and its SHA-256 hash, and registers the selected name with `Add-PrinterDriver`. It does not disable signature checks, modify Point and Print policy, or update an already registered driver version. Driver package upgrades should be piloted and handled as a separate administrative change.
+Packaged Type 3/Type 4 deployment first checks `Get-PrinterDriver`. An existing driver of that exact name must match `MajorVersion=3` or `MajorVersion=4` respectively. Otherwise the tool stages the selected INF with `pnputil /add-driver`, locates the matching INF in the Driver Store using DISM and its SHA-256 hash, and registers the selected name with `Add-PrinterDriver`. It does not disable signature checks, modify Point and Print policy, or update an already registered driver version. Driver package upgrades should be piloted and handled as a separate administrative change.
 
-Type 4 queues use RAW TCP/IP, with SNMP disabled. Ports are named from a hash of the endpoint and port, and reused on subsequent runs. LPR, WSD, printer sharing, default-printer preferences, duplex/color presets and targeting by user/site are outside this initial version. Use GPO OU/security filtering to target the appropriate computer groups.
+Type 3/Type 4 queues use RAW TCP/IP, with SNMP disabled. Ports are named from a hash of the endpoint and port, and reused on subsequent runs. LPR, WSD, printer sharing, default-printer preferences, duplex/color presets and targeting by user/site are outside this initial version. Use GPO OU/security filtering to target the appropriate computer groups.
 
 ## GPO: scheduled task recommended
 
@@ -102,7 +103,7 @@ A **computer startup script** is a simpler alternative on always-connected deskt
 
 Give reporting computer accounts (typically **Domain Computers**) **Change** at the SMB share level, but only **Read/Execute** on the deployment root, scripts, drivers and `printers.json` at the NTFS level. Reporting users need the same combination if the user-logon mode is deployed. Effective permissions combine share and NTFS permissions: the share-level Change permission allows writes that NTFS permits inside `Client Logs`; it must not be accompanied by NTFS write access to the deployment files. Restrict modification of those files to deployment administrators. Use script signing and the execution policy required by your organization. Deployment commands follow that policy; only the interactive GUI launcher sets a process-level Bypass policy.
 
-Windows Protected Print Mode blocks third-party printer drivers. A mixed IPP/Type4 deployment therefore requires a policy compatible with the Type4 printers; the tool does not change that policy. An existing same-name driver of Type 3 is rejected, and a driver-staging reboot requirement returns failure before cleanup so the task can retry after a restart.
+Windows Protected Print Mode blocks third-party printer drivers. A mixed IPP/Type3/Type4 deployment therefore requires a policy compatible with the packaged drivers; the tool does not change that policy. An existing same-name driver of the wrong major version is rejected, and a driver-staging reboot requirement returns failure before cleanup so the task can retry after a restart.
 
 ## Removing old printers
 
@@ -111,15 +112,15 @@ Cleanup is disabled by default. Two independent controls are available:
 - **Exact legacy printer names:** one name per line, such as `Old Accounting Printer (Copy 1)`. No wildcard matching. A name in this list is removed on every run if present, so this also removes a legacy queue that another policy recreates. Remove obsolete GPO printer mappings or they can reappear.
 - **Stale managed printers:** remove queues previously installed by this deployment when their names leave the configuration. Ownership records must still match the queue's observed name, driver and port. Unrelated PDF, USB and manually installed printers are preserved unless explicitly named in the legacy list.
 
-Cleanup runs after validation, name/port conflict checks, required Type 4 driver registration and an inventory export, but before installing configured queues. It is not a transaction: a later unreachable IPP device or queue failure can leave named legacy printers removed. Pilot with `-WhatIf` and retain a working printing path during migration. Never use a broad “delete all printers” script on production clients.
+Cleanup runs after validation, name/port conflict checks, required packaged-driver registration and an inventory export, but before installing configured queues. It is not a transaction: a later unreachable IPP device or queue failure can leave named legacy printers removed. Pilot with `-WhatIf` and retain a working printing path during migration. Never use a broad “delete all printers” script on production clients.
 
-The SYSTEM task installs and cleans up machine queues. It does **not** see or remove connections in other users' profiles. For old shared-printer connections, enable **Allow named per-user connections**, list their exact names (often `\\oldprintserver\queue`), and add the same script to **User Configuration > Policies > Windows Settings > Scripts > Logon > PowerShell Scripts** with:
+The SYSTEM task installs and cleans up machine queues. It does **not** see or remove connections in other users' profiles. For old shared-printer connections, add the exported **Report-UserPrinters.ps1** to **User Configuration > Policies > Windows Settings > Scripts > Logon > PowerShell Scripts**, with blank parameters. This creates no scheduled task. The legacy-cleanup checkbox does not enable reporting; leave it off for inventory alone. To remove exact legacy names on every logon, enable the checkbox in **Advanced cleanup** and list those names. Alternatively, add `PrinterDeployment.ps1` directly to the User Logon GPO with:
 
 ```text
 -Mode CleanupUser -ConfigPath "\\fileserver\Software\Printers\printers.json"
 ```
 
-This separate mode runs as the current user, installs no printers/drivers, and removes visible `Type=Connection` queues named in the legacy list or selected in that user's client report. It also reports that user's printer inventory even when legacy cleanup is disabled. It can be previewed with `-WhatIf`. It does not edit offline user hives or remove user-local direct-IP queues. Check `Get-Printer | Select Name,Type,DriverName,PortName` within each relevant user context to identify exact legacy names.
+This separate mode runs as the current user, installs no printers/drivers, and removes visible `Type=Connection` queues named in the legacy list or selected in that user's client report. It also reports that user's printer inventory even when legacy cleanup is disabled. It can be previewed with `-WhatIf`. It does not edit offline user hives or remove user-local direct-IP queues. Check `Get-Printer | Select Name,Type,DriverName,PortName` within each relevant user context to identify exact legacy names. Disable or change the old printer-deployment GPO before removing its queues, otherwise it can recreate them.
 
 ## Client Logs and removal selections
 
@@ -134,12 +135,12 @@ Each normal deployment writes:
 - The outcome of each client-specific removal request.
 - An individual JSON history file and a replaceable `latest.json` used by the GUI.
 
-The machine task reports queues visible to SYSTEM. Deploy **CleanupUser** as a user logon script to see shared-printer connections in each user's context; these appear as separate rows for the same computer. Names, drivers, ports and locations are reported; queued document contents are not collected. Reports are organized by computer name (and user SID hash for user contexts), so use separate deployment folders for domains that reuse computer names. Only clients that have successfully uploaded at least one report appear; this is not an Active Directory computer inventory or a live connection to clients.
+The machine task reports queues visible to SYSTEM. Deploy **Report-UserPrinters.ps1** as a user logon script to see shared-printer connections in each user's context. The GUI groups snapshots into one row per computer and combines its printers in the **Reported printers** tab, with an **Installed for** column showing Computer or the owning user. Computer queues also visible in user snapshots appear once; connections owned by different users remain separate. A computer with no uploaded user snapshots is marked **user inventory missing**. Only users who have run the logon script are represented; the GUI does not inspect offline profiles. Details show the last report time and result for each context. Names, drivers, ports and locations are reported; queued document contents are not collected. Reports are organized by computer name (and user SID hash for user contexts), so use separate deployment folders for domains that reuse computer names. Only clients that have successfully uploaded at least one report appear; this is not an Active Directory computer inventory or a live connection to clients.
 
 To review and clean up:
 
 1. Open the GUI for the saved configuration and select **Clients and inventories**.
-2. Click **Refresh client reports**, then select a client/context row. Review its last-report time, overall result, installed/desired count and extra queues. A changed configuration is labelled **changes pending** until that context reports the new revision.
+2. Click **Refresh computers**, then select a computer. Review its last-report time, overall result, deployed count and user reports. Select removal checkboxes beside unwanted queues; the GUI routes requests to the owning computer or user. Managed printers must first be removed from the Printers configuration so deployment will not reinstall them. A changed configuration is labelled **changes pending** until that context reports the new revision.
 3. Check **Remove** beside an extra printer, then **Save deployment bundle**. The request applies only to that computer and, for connections, the specific user SID. Desired printers cannot be selected until removed from the desired configuration.
 4. On the next deployment run (or the selected user's next logon), the client compares the queue's exact name, driver and port with the selected snapshot. A mismatch produces **Changed** and leaves the queue intact. Other printers are still attempted.
 5. Refresh reports after the next run. The **Removal requests** subtab shows Pending, Removed, NotFound, Completed, Changed or Failed. This also lets you clear requests whose printers have already disappeared from the current inventory.
@@ -154,8 +155,8 @@ Logs, queue inventories and managed ownership state are local under `%ProgramDat
 
 - Exit **0** means the run completed; **1** means validation, registration, cleanup or installation failed.
 - A machine-wide mutex prevents concurrent runs of the same deployment. Independent failures are logged while remaining configured printers are attempted.
-- Existing compatible managed queues are reused. Type4 driver/endpoint changes update the queue. An IPP URL change recreates the managed queue, with best-effort restoration on discovery failure.
-- A same-name queue outside this tool's ownership is rejected before cleanup, except for an exactly matching Type4 queue on the tool's expected port. Rename the conflicting queue or the configured queue. The tool does not silently take over arbitrary IPP printers.
+- Existing compatible managed queues are reused. Type3/Type4 driver/endpoint changes update the queue. An IPP URL change recreates the managed queue, with best-effort restoration on discovery failure.
+- A same-name queue outside this tool's ownership is rejected before cleanup, except for an exactly matching Type3/Type4 queue on the tool's expected port. Rename the conflicting queue or the configured queue. The tool does not silently take over arbitrary IPP printers.
 - Inventories record names, ports, drivers and basic metadata; they are **not** complete backups of print preferences, permissions, jobs or defaults. Recreate a removed legacy queue from your former GPO/package if necessary. Queue replacement/removal can discard queued jobs.
 - Driver packages and unused ports are retained. The script does not uninstall drivers or remove Windows' own printer resources.
 

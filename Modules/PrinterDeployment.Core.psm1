@@ -11,6 +11,43 @@ function New-PDConfiguration {
     }
 }
 
+function Get-PDIppDefaultPort {
+    param([ValidateSet('ipp','ipps','http','https')][string]$Protocol = 'ipp')
+    # IPP and IPPS both default to 631 (RFC 7472). Some printers advertise IPPS on 443 instead.
+    switch ($Protocol) { 'http' { 80 }; 'https' { 443 }; default { 631 } }
+}
+
+function New-PDIppAddress {
+    param([Parameter(Mandatory)][string]$HostName,
+        [ValidateSet('ipp','ipps','http','https')][string]$Protocol = 'ipp',
+        [string]$Subpath = '/ipp', [int]$PortNumber = 0)
+    $target = $HostName.Trim()
+    if ($target.StartsWith('[') -and $target.EndsWith(']')) { $target = $target.Substring(1, $target.Length - 2) }
+    if ([uri]::CheckHostName($target) -eq [UriHostNameType]::Unknown -or $target -match '[\s/@?#\\]') {
+        throw 'Enter only the printer IP address or hostname, without a protocol, port or path.'
+    }
+    if ($target.Contains(':')) { $target = '[' + $target + ']' }
+    if ($PortNumber -eq 0) { $PortNumber = Get-PDIppDefaultPort $Protocol }
+    if ($PortNumber -lt 1 -or $PortNumber -gt 65535) { throw 'IPP port must be 1-65535.' }
+    $path = $Subpath.Trim()
+    if (-not $path) { $path = '/ipp' }
+    if ($path -match '://|[#\\\s]' -or $path.StartsWith('//')) { throw 'Enter a printer subpath such as /ipp or /ipp/print, without a URL or fragment.' }
+    if (-not $path.StartsWith('/')) { $path = '/' + $path }
+    $Protocol.ToLowerInvariant() + '://' + $target + ':' + $PortNumber + $path
+}
+
+function Split-PDIppAddress {
+    param([Parameter(Mandatory)][string]$Address)
+    $uri = $null
+    if (-not [uri]::TryCreate($Address, [UriKind]::Absolute, [ref]$uri) -or
+        $uri.Scheme -notin @('ipp','ipps','http','https') -or -not $uri.Host -or $uri.UserInfo -or $uri.Fragment) {
+        throw 'Enter a full IPP URL without credentials or fragments.'
+    }
+    $port = $uri.Port
+    if ($port -lt 1) { $port = Get-PDIppDefaultPort $uri.Scheme }
+    [pscustomobject]@{ Protocol = $uri.Scheme; HostName = $uri.Host.Trim('[',']'); PortNumber = $port; Subpath = $uri.PathAndQuery }
+}
+
 function Resolve-PDResource {
     param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][string]$RelativePath)
     if ([IO.Path]::IsPathRooted($RelativePath) -or $RelativePath -match '[:*?]' -or
@@ -75,7 +112,8 @@ function Expand-PDInfString {
 
 function Get-PDInfModels {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Path, [ValidateSet('x64', 'ARM64')][string]$Architecture = 'x64')
+    param([Parameter(Mandatory)][string]$Path, [ValidateSet('x64', 'ARM64')][string]$Architecture = 'x64',
+        [ValidateSet(3,4)][int]$DriverType = 4)
     $sections = @{}; $section = ''; $pending = ''
     # StreamReader detects UTF-16/UTF-8 BOMs; otherwise use Windows ANSI for vendor INFs.
     $reader = New-Object IO.StreamReader($Path, [Text.Encoding]::Default, $true)
@@ -95,7 +133,9 @@ function Get-PDInfModels {
     foreach ($line in $sections['Version']) {
         if ($line -match '^([^=]+)=(.*)$') { $version[$Matches[1].Trim()] = $Matches[2].Trim().Trim('"') }
     }
-    if ($version['Class'] -ne 'Printer' -or $version['ClassVer'] -ne '4.0') { throw "Only Type 4 printer packages (Class=Printer, ClassVer=4.0) are supported: $Path" }
+    if ($version['Class'] -ne 'Printer') { throw "Not a printer INF (Class=Printer required): $Path" }
+    if ($DriverType -eq 4 -and $version['ClassVer'] -ne '4.0') { throw "Only Type 4 printer packages (Class=Printer, ClassVer=4.0) match this selection: $Path" }
+    if ($DriverType -eq 3 -and $version['ClassVer'] -and $version['ClassVer'] -ne '3.0') { throw "Select a Type 3 printer INF without ClassVer=4.0: $Path" }
     $strings = @{}
     # Prefer neutral strings. Use en-US strings only to fill missing entries.
     foreach ($s in @('Strings.0409', 'Strings')) {
@@ -166,7 +206,7 @@ function Assert-PDConfiguration {
                 $uri.Scheme -notin @('ipp','ipps','http','https') -or -not $uri.Host -or $uri.UserInfo -or $uri.Fragment) {
                 throw "Enter a full IPP URL without credentials or fragments for $($p.Name)."
             }
-        } elseif ($p.Kind -eq 'Type4') {
+        } elseif ($p.Kind -in @('Type3','Type4')) {
             if ([string]::IsNullOrWhiteSpace($p.Address) -or [uri]::CheckHostName($p.Address) -eq [UriHostNameType]::Unknown) { throw "Invalid TCP/IP host for $($p.Name)." }
             $port = 0
             if (-not [int]::TryParse([string]$p.PortNumber, [ref]$port) -or $port -lt 1 -or $port -gt 65535) { throw 'RAW TCP port must be 1-65535.' }
@@ -177,9 +217,12 @@ function Assert-PDConfiguration {
             if (-not (Test-Path -LiteralPath $package -PathType Container) -or -not (Test-Path -LiteralPath $inf -PathType Leaf)) { throw "Missing package or INF for $($p.Name)." }
             if (-not $inf.StartsWith($package.TrimEnd('\','/') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetExtension($inf) -ne '.inf') { throw 'INF must be inside its driver package.' }
             if (@(Get-ChildItem -LiteralPath $package -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) { throw 'Driver packages must not contain links or junctions.' }
-            $models = @(Get-PDInfModels $inf $Config.Architecture)
+            $models = @(Get-PDInfModels $inf $Config.Architecture -DriverType ([int]$p.Kind.Substring(4)))
             if ($p.DriverName -notin $models) { throw "Driver name is not in the selected INF: $($p.DriverName)" }
         } else { throw "Unknown printer kind: $($p.Kind)" }
+    }
+    foreach ($group in @($Config.Printers | Where-Object { $_.Kind -in @('Type3','Type4') } | Group-Object DriverName)) {
+        if (@($group.Group.Kind | Select-Object -Unique).Count -gt 1) { throw "A driver name cannot be both Type 3 and Type 4: $($group.Name)" }
     }
     foreach ($name in @($Config.Cleanup.LegacyPrinterNames)) {
         if ($name -isnot [string] -or [string]::IsNullOrWhiteSpace($name) -or $name -match '[\x00-\x1f*?\[\]]') { throw 'Legacy cleanup requires exact printer names, without wildcard characters.' }
@@ -216,7 +259,7 @@ function Get-PDHash {
 function Get-PDPrinterFingerprint {
     param($Printer)
     if ($Printer.Kind -eq 'IPP') { return Get-PDHash ("IPP|" + $Printer.Address) }
-    Get-PDHash ("Type4|$($Printer.Address.ToLowerInvariant())|$($Printer.PortNumber)|$($Printer.DriverName)")
+    Get-PDHash ("$($Printer.Kind)|$($Printer.Address.ToLowerInvariant())|$($Printer.PortNumber)|$($Printer.DriverName)")
 }
 
 function Get-PDPortName {

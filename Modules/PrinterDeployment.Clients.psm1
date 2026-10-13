@@ -150,6 +150,32 @@ function Get-PDClientReports {
     }
 }
 
+function Get-PDComputerInventory {
+    param([object[]]$Reports)
+    foreach ($group in @($Reports | Group-Object ComputerName | Sort-Object Name)) {
+        $machine = @($group.Group | Where-Object { $_.Scope -eq 'Machine' })
+        $users = @($group.Group | Where-Object { $_.Scope -eq 'UserConnection' } | Sort-Object UserName)
+        $entries = New-Object 'System.Collections.Generic.List[object]'
+        foreach ($report in @($machine) + @($users)) {
+            foreach ($printer in @($report.Printers)) {
+                # Computer queues are also visible in user snapshots; display each computer queue once.
+                if ($report.Scope -eq 'UserConnection' -and $printer.Type -ne 'Connection' -and
+                    @($machine | ForEach-Object { $_.Printers } | Where-Object {
+                        $_.Name -eq $printer.Name -and $_.DriverName -eq $printer.DriverName -and $_.PortName -eq $printer.PortName
+                    }).Count) { continue }
+                if ($report.Scope -eq 'Machine' -and $printer.Type -eq 'Connection' -and
+                    @($users | ForEach-Object { $_.Printers } | Where-Object { $_.Type -eq 'Connection' -and $_.Name -eq $printer.Name }).Count) { continue }
+                $owner = if ($report.Scope -eq 'Machine') { 'Computer' } else { $report.UserName }
+                $canRemove = ($report.Scope -eq 'Machine' -and $printer.Type -ne 'Connection') -or
+                    ($report.Scope -eq 'UserConnection' -and $printer.Type -eq 'Connection')
+                $entries.Add([pscustomobject]@{ Printer=$printer; Report=$report; Owner=$owner; CanRemove=$canRemove })
+            }
+        }
+        [pscustomobject]@{ ComputerName=$group.Name; Reports=@($group.Group); MachineReport=($machine | Select-Object -First 1)
+            UserReportCount=$users.Count; Printers=$entries.ToArray() }
+    }
+}
+
 function Set-PDClientLogPermissions {
     param([string]$Root)
     if ($env:OS -ne 'Windows_NT') { throw 'Configure report permissions from Windows.' }

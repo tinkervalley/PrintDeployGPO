@@ -113,6 +113,33 @@ Model="Test Printer v4"
         Assert-PDConfiguration $read $tempRoot
         Assert-True ($read.Printers[0].Location -eq 'Updated location') 'Atomic replacement lost update.'
     }
+    Test-Case 'IPP host/protocol/subpath builds URLs with automatic ports and supports IPv6' {
+        Assert-True ((New-PDIppAddress '192.0.2.55') -eq 'ipp://192.0.2.55:631/ipp') 'IPP defaults incorrect.'
+        Assert-True ((New-PDIppAddress 'printer.example.com' ipps 'ipp/print') -eq 'ipps://printer.example.com:631/ipp/print') 'IPPS defaults or path normalization incorrect.'
+        Assert-True ((New-PDIppAddress 'printer.example.com' ipps '/ipp/print' 443) -eq 'ipps://printer.example.com:443/ipp/print') 'Custom port lost.'
+        Assert-True ((New-PDIppAddress '2001:db8::55') -eq 'ipp://[2001:db8::55]:631/ipp') 'IPv6 was not bracketed.'
+        foreach ($address in @('ipp://printer.example.com:631/ipp','ipps://printer.example.com:443/ipp/print','https://printer.example.com/ipp/print?queue=1','ipp://[2001:db8::55]/ipp')) {
+            $parts=Split-PDIppAddress $address
+            $rebuilt=Split-PDIppAddress (New-PDIppAddress -HostName $parts.HostName -Protocol $parts.Protocol -Subpath $parts.Subpath -PortNumber $parts.PortNumber)
+            Assert-True ($parts.Protocol -eq $rebuilt.Protocol -and $parts.HostName -eq $rebuilt.HostName -and $parts.PortNumber -eq $rebuilt.PortNumber -and $parts.Subpath -eq $rebuilt.Subpath) 'Saved IPP endpoint changed.'
+        }
+        foreach ($hostValue in @('ipp://printer.example.com','printer.example.com:631','printer.example.com/ipp','user@printer.example.com')) {
+            Assert-Throws { New-PDIppAddress $hostValue } 'only the printer'
+        }
+        Assert-Throws { New-PDIppAddress 'printer.example.com' ipp '//other/ipp' } 'subpath'
+        Assert-Throws { New-PDIppAddress 'printer.example.com' ipp '/ipp#fragment' } 'subpath'
+    }
+    Test-Case 'Type 3 INF validation is explicit and rejects Type 4 packages' {
+        $type3Inf=Join-Path $packagePath 'type3-valid.inf'
+        (Get-Content $inf -Raw).Replace('ClassVer=4.0 ; v4','') | Set-Content $type3Inf -Encoding Unicode
+        $models=@(Get-PDInfModels $type3Inf x64 -DriverType 3)
+        Assert-True ('Test Printer v4' -in $models) 'Type 3 model enumeration failed.'
+        Assert-Throws { Get-PDInfModels $inf x64 -DriverType 3 } 'Type 3'
+        $config=New-PDConfiguration; $printer=New-TestPrinter 'Legacy v3' 'Type3'
+        $printer.Address='192.0.2.56'; $printer.PackagePath='Drivers\vendor'; $printer.InfPath='Drivers\vendor\type3-valid.inf'; $printer.DriverName='Test Printer v4'
+        $config.Printers=@($printer); Assert-PDConfiguration $config $tempRoot
+        $printer.Kind='Type4'; Assert-Throws { Assert-PDConfiguration $config $tempRoot } 'Only Type 4'
+    }
     Test-Case 'Invalid URL, duplicate names, flags, names and wildcards rejected' {
         $c = New-PDConfiguration; $p = New-TestPrinter; $c.Printers = @($p)
         $p.Address = 'printer.example.com'; Assert-Throws { Assert-PDConfiguration $c $tempRoot } 'full IPP URL'
@@ -165,7 +192,7 @@ Model="Test Printer v4"
         New-Item -Path $bundleRoot -ItemType Directory | Out-Null
         $publishConfig = New-PDConfiguration; $publishConfig.Printers = @((New-TestPrinter))
         Publish-PDBundle $publishConfig $bundleRoot $projectRoot
-        foreach ($relative in @('PrinterDeployment.ps1','Launch-Configurator.cmd','README.md','printers.json','GPO-Setup.txt','Install-PrinterDeploymentTask.ps1',
+        foreach ($relative in @('PrinterDeployment.ps1','Launch-Configurator.cmd','README.md','printers.json','GPO-Setup.txt','Install-PrinterDeploymentTask.ps1','Report-UserPrinters.ps1',
             'Modules/PrinterDeployment.Core.psm1','Modules/PrinterDeployment.Deploy.psm1','Modules/PrinterDeployment.Gui.psm1','Modules/PrinterDeployment.Clients.psm1','Client Logs')) {
             Assert-True (Test-Path -LiteralPath (Join-Path $bundleRoot $relative)) "Bundle missing $relative"
         }
@@ -222,6 +249,26 @@ Model="Test Printer v4"
             Assert-True ($taskMock.Registrations -eq 2) 'Startup overwrote an unrelated task.'
         } finally { $env:windir = $originalWindir }
     }
+    Test-Case 'Generated user logon export forwards literal paths and creates no scheduled task' {
+        $logonRoot='\\server\Software\Office''s Printers $(throw 42)'
+        $generated=Get-PDUserLogonScript $logonRoot
+        $tokens=$null; $errors=$null
+        [void][Management.Automation.Language.Parser]::ParseInput($generated,[ref]$tokens,[ref]$errors)
+        Assert-True (-not $errors) 'User logon export has syntax errors.'
+        Assert-True ($generated -notmatch 'Register-ScheduledTask|ExecutionPolicy') 'User logon export adds a task or bypasses policy.'
+        $fixture=Join-Path $tempRoot 'fake-host.ps1'
+        '$global:PDLogonArgs = @($args); $global:LASTEXITCODE = 0' | Set-Content $fixture
+        function Join-Path { param($Path,$ChildPath) $fixture }
+        $originalWindir=$env:windir; $env:windir=$tempRoot
+        try {
+            . ([scriptblock]::Create($generated))
+            Invoke-PDUserLogon
+            Assert-True ($global:PDLogonArgs[3] -ceq ($logonRoot + '\PrinterDeployment.ps1')) 'Share path was interpolated or split.'
+            Assert-True ($global:PDLogonArgs[5] -eq 'CleanupUser' -and $global:PDLogonArgs[7] -ceq ($logonRoot + '\printers.json')) 'Wrong user mode or configuration.'
+            $WhatIf=$true; Invoke-PDUserLogon
+            Assert-True ($global:PDLogonArgs[-1] -eq '-WhatIf') 'User logon preview was not forwarded.'
+        } finally { $env:windir=$originalWindir; Remove-Variable PDLogonArgs -Scope Global -ErrorAction SilentlyContinue }
+    }
     Test-Case 'Publishing and resource validation reject linked folders' {
         $linkRoot = Join-Path $tempRoot 'LinkedBundle'; $outside = Join-Path $tempRoot 'Outside'
         New-Item -Path $linkRoot,$outside -ItemType Directory | Out-Null
@@ -274,6 +321,21 @@ Model="Test Printer v4"
         Assert-True (@(Get-PDClientReports $reportRoot $reportConfig.DeploymentId -WarningAction SilentlyContinue).Count -eq 1) 'Corrupt report prevented reading valid reports.'
         Assert-True (@(Get-ChildItem -LiteralPath (Join-Path $reportRoot 'Client Logs/PC001') -Filter '*.json').Count -eq 2) 'Run history and latest snapshot not written.'
     }
+    Test-Case 'Combined computer inventory deduplicates local queues and keeps user removal identities' {
+        $config=New-PDConfiguration
+        $local=[pscustomobject]@{ Name='Local'; Type='Local'; DriverName='Class'; PortName='IPP'; Location='' }
+        $connection=[pscustomobject]@{ Name='\\domain\printer'; Type='Connection'; DriverName='Legacy'; PortName='UNC'; Location='' }
+        $machine=New-PDClientReport -Config $config -Identity ([pscustomobject]@{ ComputerName='PC001'; Scope='Machine'; UserSid=''; UserName='SYSTEM' }) -After @($local) -Result Success -StartedAt (Get-Date -Format o)
+        $user1=New-PDClientReport -Config $config -Identity ([pscustomobject]@{ ComputerName='PC001'; Scope='UserConnection'; UserSid='S-1-5-21-1-2-3-1001'; UserName='DOMAIN\Alice' }) -After @($local,$connection) -Result Success -StartedAt (Get-Date -Format o)
+        $user2=New-PDClientReport -Config $config -Identity ([pscustomobject]@{ ComputerName='PC001'; Scope='UserConnection'; UserSid='S-1-5-21-1-2-3-1002'; UserName='DOMAIN\Bob' }) -After @($local,$connection) -Result Success -StartedAt (Get-Date -Format o)
+        $computers=@(Get-PDComputerInventory -Reports @($machine,$user1,$user2))
+        Assert-True ($computers.Count -eq 1 -and $computers[0].UserReportCount -eq 2 -and $computers[0].Printers.Count -eq 3) 'Computer queues duplicated or users merged.'
+        $entry=@($computers[0].Printers | Where-Object { $_.Owner -eq 'DOMAIN\Bob' })[0]
+        Assert-True ($entry.CanRemove) 'User connection cannot be selected.'
+        Set-PDClientRemovalSelection $config $entry.Report $entry.Printer $true
+        Assert-True ($config.ClientRemovals[0].UserSid -eq $user2.UserSid -and $config.ClientRemovals[0].Scope -eq 'UserConnection') 'Selection lost its user identity.'
+        Assert-True (@(Get-PDClientRemovalRequests $config $user1).Count -eq 0) 'Selection targeted another user.'
+    }
     Test-Case 'Missing desired queue prevents a successful final report' {
         $reportConfig=New-PDConfiguration; $reportConfig.Printers=@((New-TestPrinter))
         $identity=[pscustomobject]@{ ComputerName='PC001'; Scope='Machine'; UserSid=''; UserName='SYSTEM' }
@@ -285,6 +347,27 @@ Model="Test Printer v4"
     # planning, reconciliation, state persistence and cleanup logic remain in use.
     Import-Module (Join-Path $projectRoot 'Modules/PrinterDeployment.Deploy.psm1') -Force
     $module = Get-Module PrinterDeployment.Deploy
+    Test-Case 'Packaged driver registration checks Type 3/4 versions, stages and verifies exact INF' {
+        & $module {
+            param($InfPath,$Root)
+            $script:PDLogPath=$null; $script:PDDriverMock=@{ Driver=$null; Stages=0; Registered=0; MajorVersion=3; StageCode=0; Inf=$InfPath }
+            function script:Import-Module { [CmdletBinding()]param($Name) }
+            function script:Get-PrinterDriver { [CmdletBinding()]param() if ($script:PDDriverMock.Driver) { $script:PDDriverMock.Driver } }
+            function script:Invoke-PDDriverStaging { param($InfPath) $script:PDDriverMock.Stages++; [pscustomobject]@{ ExitCode=$script:PDDriverMock.StageCode; Output='Staged' } }
+            function script:Get-WindowsDriver { [CmdletBinding()]param([switch]$Online,[switch]$All) [pscustomobject]@{ ClassName='Printer'; OriginalFileName=$script:PDDriverMock.Inf } }
+            function script:Add-PrinterDriver { [CmdletBinding()]param($Name,$InfPath) $script:PDDriverMock.Registered++; $script:PDDriverMock.Driver=[pscustomobject]@{ Name=$Name; MajorVersion=$script:PDDriverMock.MajorVersion } }
+            $printer=[pscustomobject]@{ Kind='Type3'; DriverName='Legacy'; InfPath='Drivers\vendor\type3-valid.inf' }
+            Install-PDPackagedDriver $printer $Root
+            Assert-True ($script:PDDriverMock.Stages -eq 1 -and $script:PDDriverMock.Registered -eq 1) 'Type 3 was not staged/registered.'
+            Install-PDPackagedDriver $printer $Root
+            Assert-True ($script:PDDriverMock.Stages -eq 1) 'Installed Type 3 staged again.'
+            $printer.Kind='Type4'; Assert-Throws { Install-PDPackagedDriver $printer $Root } 'not a Type 4'
+            $script:PDDriverMock.Driver=$null; $printer.Kind='Type3'; $script:PDDriverMock.MajorVersion=4
+            Assert-Throws { Install-PDPackagedDriver $printer $Root } 'Type 3 driver registration failed'
+            $script:PDDriverMock.Driver=$null; $script:PDDriverMock.StageCode=3010
+            Assert-Throws { Install-PDPackagedDriver $printer $Root } 'requires a restart'
+        } (Join-Path $packagePath 'type3-valid.inf') $tempRoot
+    }
     $global:PDMock = @{ Printers = @(); Ports = @(); Events = (New-Object 'System.Collections.Generic.List[string]'); DriverFailure = $false; IppFailure = $false; ComputerName='PC001'; UserSid='S-1-5-21-100-100-100-1100'; UploadFailure=$false }
     & $module {
         function script:Import-Module { [CmdletBinding()]param([string]$Name) }
@@ -307,7 +390,7 @@ Model="Test Printer v4"
         function script:Get-Printer { [CmdletBinding()]param() $global:PDMock.Printers }
         function script:Get-PrinterPort { [CmdletBinding()]param() $global:PDMock.Ports }
         function script:Get-CimInstance { [CmdletBinding()]param([string]$ClassName) $global:PDMock.Ports }
-        function script:Install-PDType4Driver {
+        function script:Install-PDPackagedDriver {
             param($Printer,[string]$Root)
             $global:PDMock.Events.Add('Driver:' + $Printer.DriverName)
             if ($global:PDMock.DriverFailure) { throw 'Mock driver staging failure' }
@@ -407,6 +490,23 @@ Model="Test Printer v4"
         $typeConfig.Printers = @(); $typeConfig.Cleanup.RemoveStaleManaged = $true; Write-PDJson $typeConfig $deploymentFile
         Invoke-PDDeployment -ConfigPath $deploymentFile -RetryCount 1
         Assert-True ('TCP Printer' -notin $global:PDMock.Printers.Name -and 'Office' -in $global:PDMock.Printers.Name) 'Stale cleanup affected another deployment.'
+    }
+    Test-Case 'Type 3 TCP deployment uses packaged drivers and remains idempotent' {
+        $config=New-PDConfiguration; $printer=New-TestPrinter 'Type 3 queue' 'Type3'
+        $printer.Address='192.0.2.56'; $printer.PackagePath='Drivers\vendor'; $printer.InfPath='Drivers\vendor\type3-valid.inf'; $printer.DriverName='Legacy Type 3'
+        (Get-Content (Join-Path $packagePath 'type3-valid.inf') -Raw).Replace('Test Printer v4','Legacy Type 3') | Set-Content (Join-Path $packagePath 'type3-deploy.inf') -Encoding Unicode
+        $printer.InfPath='Drivers\vendor\type3-deploy.inf'; $config.Printers=@($printer); Write-PDJson $config $deploymentFile
+        Invoke-PDDeployment $deploymentFile -RetryCount 1; Invoke-PDDeployment $deploymentFile -RetryCount 1
+        Assert-True (@($global:PDMock.Printers | Where-Object { $_.Name -eq $printer.Name }).Count -eq 1) 'Type 3 queue duplicated.'
+        Assert-True ('Driver:Legacy Type 3' -in $global:PDMock.Events) 'Type 3 driver registration skipped.'
+    }
+    Test-Case 'User inventory reports old UNC connections with legacy cleanup disabled' {
+        $config=New-PDConfiguration; Write-PDJson $config $deploymentFile
+        $connection=[pscustomobject]@{ Name='\\domain\printer'; Type='Connection'; DriverName='Legacy'; PortName='UNC'; Location=''; Comment='' }
+        $global:PDMock.Printers += $connection
+        $before=$global:PDMock.Events.Count; Invoke-PDUserCleanup $deploymentFile
+        $report=@(Get-PDClientReports $tempRoot $config.DeploymentId)[0]
+        Assert-True ($connection.Name -in $report.Printers.Name -and $global:PDMock.Events.Count -eq $before) 'User inventory removed or omitted the UNC connection.'
     }
     Test-Case 'User cleanup removes only opted-in exact connection names' {
         $userConfig = New-PDConfiguration; $userConfig.Cleanup.CleanupUserConnections = $true

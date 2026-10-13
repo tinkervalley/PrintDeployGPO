@@ -23,20 +23,27 @@ function Get-PDInstalledDriver {
     if ($found.Count -eq 1) { $found[0] }
 }
 
-function Install-PDType4Driver {
+function Invoke-PDDriverStaging {
+    param([string]$InfPath)
+    $output = & (Join-Path $env:windir 'System32\pnputil.exe') /add-driver $InfPath 2>&1
+    [pscustomobject]@{ ExitCode=$LASTEXITCODE; Output=($output -join ' ') }
+}
+
+function Install-PDPackagedDriver {
     param($Printer, [string]$Root)
+    $expectedVersion = [int]$Printer.Kind.Substring(4)
     $driver = Get-PDInstalledDriver $Printer.DriverName
     if ($driver) {
-        if ($driver.MajorVersion -ne 4) { throw "Installed '$($Printer.DriverName)' is not a Type 4 driver." }
+        if ($driver.MajorVersion -ne $expectedVersion) { throw "Installed '$($Printer.DriverName)' is not a Type $expectedVersion driver." }
         Write-PDLog "Driver already installed: $($Printer.DriverName)"
         return
     }
     $inf = Resolve-PDResource $Root $Printer.InfPath
     # Stage the selected INF, retaining its original package hierarchy on the share.
     # Do not /install across devices or stage every unrelated INF in the package.
-    $output = & (Join-Path $env:windir 'System32\pnputil.exe') /add-driver $inf 2>&1
-    $code = $LASTEXITCODE
-    Write-PDLog ("pnputil ({0}): {1}" -f $code, ($output -join ' '))
+    $staging = Invoke-PDDriverStaging $inf
+    $code = $staging.ExitCode
+    Write-PDLog ("pnputil ({0}): {1}" -f $code, $staging.Output)
     if ($code -notin @(0, 3010)) { throw "Driver staging failed ($code): $inf" }
     if ($code -eq 3010) { throw 'Driver staging requires a restart. Restart this computer and rerun deployment; cleanup has not started.' }
     # Add-PrinterDriver requires an INF in the Driver Store, not the source UNC path.
@@ -57,7 +64,7 @@ function Install-PDType4Driver {
     if (-not $storeInf) { throw "Staged INF could not be located in the Driver Store: $inf" }
     Add-PrinterDriver -Name $Printer.DriverName -InfPath $storeInf -ErrorAction Stop
     $driver = Get-PDInstalledDriver $Printer.DriverName
-    if (-not $driver -or $driver.MajorVersion -ne 4) { throw "Type 4 driver registration failed: $($Printer.DriverName)" }
+    if (-not $driver -or $driver.MajorVersion -ne $expectedVersion) { throw "Type $expectedVersion driver registration failed: $($Printer.DriverName)" }
 }
 
 function Test-PDPort {
@@ -117,7 +124,7 @@ function Complete-PDClientReporting {
     foreach ($key in $Records.Keys) { $verified[$key] = $Records[$key] }
     if ($Identity.Scope -eq 'Machine' -and -not $inventoryError) {
         try {
-            foreach ($p in @($Config.Printers | Where-Object { $_.Kind -eq 'Type4' })) {
+            foreach ($p in @($Config.Printers | Where-Object { $_.Kind -in @('Type3','Type4') })) {
                 if (-not (Test-PDPort (Get-PDTcpPort (Get-PDPortName $p)) $p)) { $verified.Remove($p.Name) }
             }
         } catch { $inventoryError = $_.Exception.Message; $Result = 'Failed' }
@@ -225,19 +232,19 @@ function Invoke-PDDeployment {
             $owned = $records.ContainsKey($p.Name) -and $existing -and
                 $records[$p.Name].PortName -eq $existing.PortName -and $records[$p.Name].DriverName -eq $existing.DriverName
             if ($existing -and -not $owned) {
-                $sameTcp = $p.Kind -eq 'Type4' -and $existing.DriverName -eq $p.DriverName -and
+                $sameTcp = $p.Kind -in @('Type3','Type4') -and $existing.DriverName -eq $p.DriverName -and
                     $existing.PortName -eq (Get-PDPortName $p) -and (Test-PDPort (Get-PDTcpPort $existing.PortName) $p)
                 if (-not $sameTcp) { throw "Printer '$($p.Name)' exists outside this tool's management. Rename it or the configured queue before deploying." }
             }
-            if ($p.Kind -eq 'Type4') {
+            if ($p.Kind -in @('Type3','Type4')) {
                 $portName = Get-PDPortName $p
                 $port = @(Get-PrinterPort -ErrorAction Stop | Where-Object { $_.Name -eq $portName })
                 if ($port.Count -and -not (Test-PDPort (Get-PDTcpPort $portName) $p)) { throw "Existing port '$portName' has different settings. Resolve the conflict before deploying." }
             }
         }
         # Register all required drivers BEFORE removing old queues. A bad/signed-blocked package aborts cleanup.
-        foreach ($p in @($config.Printers | Where-Object { $_.Kind -eq 'Type4' } | Sort-Object DriverName -Unique)) {
-            if ($PSCmdlet.ShouldProcess($p.DriverName, 'Ensure Type 4 driver is installed')) { Install-PDType4Driver $p $root }
+        foreach ($p in @($config.Printers | Where-Object { $_.Kind -in @('Type3','Type4') } | Sort-Object DriverName -Unique)) {
+            if ($PSCmdlet.ShouldProcess($p.DriverName, "Ensure $($p.Kind) driver is installed")) { Install-PDPackagedDriver $p $root }
         }
         if (-not $dryRun) {
             # Inventory for review/recovery; this is not an automatic full printer-settings backup.
@@ -276,7 +283,7 @@ function Invoke-PDDeployment {
                     Write-PDLog "Already configured: $($p.Name)"; continue
                 }
                 if (-not $PSCmdlet.ShouldProcess($p.Name, "Install or reconcile $($p.Kind) printer at $($p.Address)")) { continue }
-                if ($p.Kind -eq 'Type4') {
+                if ($p.Kind -in @('Type3','Type4')) {
                     $portName = Get-PDPortName $p
                     if (-not (Get-PDTcpPort $portName)) {
                         # SNMP is opt-in on Add-PrinterPort. Omit it for a plain RAW port.

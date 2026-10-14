@@ -44,7 +44,7 @@ function Install-PDPackagedDriver {
     $staging = Invoke-PDDriverStaging $inf
     $code = $staging.ExitCode
     Write-PDLog ("pnputil ({0}): {1}" -f $code, $staging.Output)
-    if ($code -notin @(0, 3010)) { throw "Driver staging failed ($code): $inf" }
+    if ($code -notin @(0, 3010)) { throw "Driver staging failed ($code): $inf. $($staging.Output)" }
     if ($code -eq 3010) { throw 'Driver staging requires a restart. Restart this computer and rerun deployment; cleanup has not started.' }
     # Add-PrinterDriver requires an INF in the Driver Store, not the source UNC path.
     # DISM's objects avoid parsing localized pnputil output for oemNN.inf names.
@@ -246,91 +246,97 @@ function Invoke-PDDeployment {
                 if ($port.Count -and -not (Test-PDPort (Get-PDTcpPort $portName) $p)) { throw "Existing port '$portName' has different settings. Resolve the conflict before deploying." }
             }
         }
-        # Register all required drivers BEFORE removing old queues. A bad/signed-blocked package aborts cleanup.
-        foreach ($p in @($applicablePrinters | Where-Object { $_.Kind -in @('Type3','Type4') } | Sort-Object DriverName -Unique)) {
-            if ($PSCmdlet.ShouldProcess($p.DriverName, "Ensure $($p.Kind) driver is installed")) { Install-PDPackagedDriver $p $root }
-        }
         if (-not $dryRun) {
             # Inventory for review/recovery; this is not an automatic full printer-settings backup.
             $installed | Select-Object Name, Type, DriverName, PortName, Location, Comment, Shared, ShareName |
                 Export-Clixml -LiteralPath (Join-Path $stateRoot ("inventory-" + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.xml'))
         }
         $failures = New-Object 'System.Collections.Generic.List[string]'
-        foreach ($old in $cleanup) {
-            try {
-                if ($PSCmdlet.ShouldProcess($old.Name, 'Remove legacy or stale managed printer before installation')) {
-                    Remove-Printer -InputObject $old -ErrorAction Stop
-                    $records.Remove($old.Name)
-                    Save-PDState $records $statePath $config.DeploymentId -CompletedRemovals $receipts.ToArray()
-                    Write-PDLog "Removed old printer: $($old.Name)"
+        # IPP queues are installed and their ownership saved before any vendor driver is staged.
+        foreach ($phase in @('IPP','Vendor')) {
+            if ($phase -eq 'Vendor') {
+                # Register all required drivers BEFORE removing old queues. A bad/signed-blocked package aborts cleanup.
+                foreach ($p in @($applicablePrinters | Where-Object { $_.Kind -in @('Type3','Type4') } | Sort-Object DriverName -Unique)) {
+                    if ($PSCmdlet.ShouldProcess($p.DriverName, "Ensure $($p.Kind) driver is installed")) { Install-PDPackagedDriver $p $root }
                 }
-            } catch { $failures.Add("Cleanup '$($old.Name)': $($_.Exception.Message)"); Write-PDLog $failures[$failures.Count - 1] 'ERROR' }
-        }
-        $identity = Get-PDClientIdentity -Scope Machine
-        $removalResults = @(Invoke-PDSelectedRemovals -Config $config -Identity $identity -Records $records -Receipts $receipts -StatePath $statePath -WhatIf:$dryRun)
-        foreach ($result in $removalResults) {
-            Write-PDLog "Client removal '$($result.Name)': $($result.Status). $($result.Message)"
-            if ($result.Status -in @('Failed','Changed')) { $failures.Add("Client removal '$($result.Name)': $($result.Message)") }
-        }
-        foreach ($p in $applicablePrinters) {
-            try {
-                $existing = Get-PDInstalledPrinter $p.Name
-                $fingerprint = Get-PDPrinterFingerprint $p
-                $same = $existing -and $records.ContainsKey($p.Name) -and $records[$p.Name].Fingerprint -eq $fingerprint -and
-                    $records[$p.Name].PortName -eq $existing.PortName -and $records[$p.Name].DriverName -eq $existing.DriverName
-                if ($same) {
-                    if ($PSCmdlet.ShouldProcess($p.Name, 'Update printer location and comment')) {
-                        if ($existing.Location -ne $p.Location -or $existing.Comment -ne $p.Comment) {
-                            Set-Printer -InputObject $existing -Location $p.Location -Comment $p.Comment -ErrorAction Stop
-                        }
-                    }
-                    Write-PDLog "Already configured: $($p.Name)"; continue
-                }
-                if (-not $PSCmdlet.ShouldProcess($p.Name, "Install or reconcile $($p.Kind) printer at $($p.Address)")) { continue }
-                if ($p.Kind -in @('Type3','Type4')) {
-                    $portName = Get-PDPortName $p
-                    if (-not (Get-PDTcpPort $portName)) {
-                        # SNMP is opt-in on Add-PrinterPort. Omit it for a plain RAW port.
-                        Add-PrinterPort -Name $portName -PrinterHostAddress $p.Address -PortNumber $p.PortNumber -ErrorAction Stop | Out-Null
-                        if (-not (Test-PDPort (Get-PDTcpPort $portName) $p)) { throw 'New TCP/IP port did not have the expected RAW/SNMP settings.' }
-                    }
-                    if ($existing) {
-                        Set-Printer -InputObject $existing -DriverName $p.DriverName -PortName $portName -Location $p.Location -Comment $p.Comment -ErrorAction Stop
-                    } else {
-                        Add-Printer -Name $p.Name -DriverName $p.DriverName -PortName $portName -Location $p.Location -Comment $p.Comment -ErrorAction Stop
-                    }
-                } else {
-                    # IPP has its own Add-Printer parameter set; DriverName cannot be passed alongside IppURL.
-                    if ($existing) { Remove-Printer -InputObject $existing -ErrorAction Stop }
+                foreach ($old in $cleanup) {
                     try {
-                        Add-Printer -Name $p.Name -IppURL $p.Address -Location $p.Location -Comment $p.Comment -ErrorAction Stop
-                        $created = Get-PDInstalledPrinter $p.Name
-                        if (-not $created) { throw 'IPP discovery did not create the requested queue.' }
-                        if ($created.DriverName -ne 'Microsoft IPP Class Driver') {
-                            if (-not (Get-PDInstalledDriver 'Microsoft IPP Class Driver')) {
-                                Add-PrinterDriver -Name 'Microsoft IPP Class Driver' -ErrorAction Stop
-                            }
-                            Set-Printer -InputObject $created -DriverName 'Microsoft IPP Class Driver' -ErrorAction Stop
+                        if ($PSCmdlet.ShouldProcess($old.Name, 'Remove legacy or stale managed printer before installation')) {
+                            Remove-Printer -InputObject $old -ErrorAction Stop
+                            $records.Remove($old.Name)
+                            Save-PDState $records $statePath $config.DeploymentId -CompletedRemovals $receipts.ToArray()
+                            Write-PDLog "Removed old printer: $($old.Name)"
                         }
-                    } catch {
-                        $installError = $_
-                        # Best-effort restoration of the former queue using the retained port/driver.
-                        $partial = Get-PDInstalledPrinter $p.Name
-                        if ($partial) { Remove-Printer -InputObject $partial -ErrorAction Stop }
-                        if ($existing) {
-                            try { Add-Printer -Name $existing.Name -DriverName $existing.DriverName -PortName $existing.PortName -Location $existing.Location -Comment $existing.Comment -ErrorAction Stop }
-                            catch { Write-PDLog "Could not restore $($p.Name): $($_.Exception.Message)" 'ERROR' }
-                        }
-                        throw $installError
-                    }
+                    } catch { $failures.Add("Cleanup '$($old.Name)': $($_.Exception.Message)"); Write-PDLog $failures[$failures.Count - 1] 'ERROR' }
                 }
-                $actual = Get-PDInstalledPrinter $p.Name
-                $expectedDriver = if ($p.Kind -eq 'IPP') { 'Microsoft IPP Class Driver' } else { $p.DriverName }
-                if (-not $actual -or $actual.DriverName -ne $expectedDriver) { throw 'Installed printer failed driver verification.' }
-                $records[$p.Name] = [pscustomobject]@{ Name = $p.Name; Fingerprint = $fingerprint; PortName = $actual.PortName; DriverName = $actual.DriverName }
-                Save-PDState $records $statePath $config.DeploymentId -CompletedRemovals $receipts.ToArray()
-                Write-PDLog "Configured: $($p.Name)"
-            } catch { $failures.Add("Printer '$($p.Name)': $($_.Exception.Message)"); Write-PDLog $failures[$failures.Count - 1] 'ERROR' }
+                $identity = Get-PDClientIdentity -Scope Machine
+                $removalResults = @(Invoke-PDSelectedRemovals -Config $config -Identity $identity -Records $records -Receipts $receipts -StatePath $statePath -WhatIf:$dryRun)
+                foreach ($result in $removalResults) {
+                    Write-PDLog "Client removal '$($result.Name)': $($result.Status). $($result.Message)"
+                    if ($result.Status -in @('Failed','Changed')) { $failures.Add("Client removal '$($result.Name)': $($result.Message)") }
+                }
+            }
+            $phasePrinters=@($applicablePrinters | Where-Object { ($phase -eq 'IPP' -and $_.Kind -eq 'IPP') -or ($phase -eq 'Vendor' -and $_.Kind -in @('Type3','Type4')) })
+            foreach ($p in $phasePrinters) {
+                try {
+                    $existing = Get-PDInstalledPrinter $p.Name
+                    $fingerprint = Get-PDPrinterFingerprint $p
+                    $same = $existing -and $records.ContainsKey($p.Name) -and $records[$p.Name].Fingerprint -eq $fingerprint -and
+                        $records[$p.Name].PortName -eq $existing.PortName -and $records[$p.Name].DriverName -eq $existing.DriverName
+                    if ($same) {
+                        if ($PSCmdlet.ShouldProcess($p.Name, 'Update printer location and comment')) {
+                            if ($existing.Location -ne $p.Location -or $existing.Comment -ne $p.Comment) {
+                                Set-Printer -InputObject $existing -Location $p.Location -Comment $p.Comment -ErrorAction Stop
+                            }
+                        }
+                        Write-PDLog "Already configured: $($p.Name)"; continue
+                    }
+                    if (-not $PSCmdlet.ShouldProcess($p.Name, "Install or reconcile $($p.Kind) printer at $($p.Address)")) { continue }
+                    if ($p.Kind -in @('Type3','Type4')) {
+                        $portName = Get-PDPortName $p
+                        if (-not (Get-PDTcpPort $portName)) {
+                            # SNMP is opt-in on Add-PrinterPort. Omit it for a plain RAW port.
+                            Add-PrinterPort -Name $portName -PrinterHostAddress $p.Address -PortNumber $p.PortNumber -ErrorAction Stop | Out-Null
+                            if (-not (Test-PDPort (Get-PDTcpPort $portName) $p)) { throw 'New TCP/IP port did not have the expected RAW/SNMP settings.' }
+                        }
+                        if ($existing) {
+                            Set-Printer -InputObject $existing -DriverName $p.DriverName -PortName $portName -Location $p.Location -Comment $p.Comment -ErrorAction Stop
+                        } else {
+                            Add-Printer -Name $p.Name -DriverName $p.DriverName -PortName $portName -Location $p.Location -Comment $p.Comment -ErrorAction Stop
+                        }
+                    } else {
+                        # IPP has its own Add-Printer parameter set; DriverName cannot be passed alongside IppURL.
+                        if ($existing) { Remove-Printer -InputObject $existing -ErrorAction Stop }
+                        try {
+                            Add-Printer -Name $p.Name -IppURL $p.Address -Location $p.Location -Comment $p.Comment -ErrorAction Stop
+                            $created = Get-PDInstalledPrinter $p.Name
+                            if (-not $created) { throw 'IPP discovery did not create the requested queue.' }
+                            if ($created.DriverName -ne 'Microsoft IPP Class Driver') {
+                                if (-not (Get-PDInstalledDriver 'Microsoft IPP Class Driver')) {
+                                    Add-PrinterDriver -Name 'Microsoft IPP Class Driver' -ErrorAction Stop
+                                }
+                                Set-Printer -InputObject $created -DriverName 'Microsoft IPP Class Driver' -ErrorAction Stop
+                            }
+                        } catch {
+                            $installError = $_
+                            # Best-effort restoration of the former queue using the retained port/driver.
+                            $partial = Get-PDInstalledPrinter $p.Name
+                            if ($partial) { Remove-Printer -InputObject $partial -ErrorAction Stop }
+                            if ($existing) {
+                                try { Add-Printer -Name $existing.Name -DriverName $existing.DriverName -PortName $existing.PortName -Location $existing.Location -Comment $existing.Comment -ErrorAction Stop }
+                                catch { Write-PDLog "Could not restore $($p.Name): $($_.Exception.Message)" 'ERROR' }
+                            }
+                            throw $installError
+                        }
+                    }
+                    $actual = Get-PDInstalledPrinter $p.Name
+                    $expectedDriver = if ($p.Kind -eq 'IPP') { 'Microsoft IPP Class Driver' } else { $p.DriverName }
+                    if (-not $actual -or $actual.DriverName -ne $expectedDriver) { throw 'Installed printer failed driver verification.' }
+                    $records[$p.Name] = [pscustomobject]@{ Name = $p.Name; Fingerprint = $fingerprint; PortName = $actual.PortName; DriverName = $actual.DriverName }
+                    Save-PDState $records $statePath $config.DeploymentId -CompletedRemovals $receipts.ToArray()
+                    Write-PDLog "Configured: $($p.Name)"
+                } catch { $failures.Add("Printer '$($p.Name)': $($_.Exception.Message)"); Write-PDLog $failures[$failures.Count - 1] 'ERROR' }
+            }
         }
         if ($failures.Count) { throw ("Deployment completed with failures: " + ($failures -join '; ')) }
         $runResult = 'Success'

@@ -429,10 +429,10 @@ Model="Test Printer v4"
             # Windows PowerShell modules cannot resolve test helpers in the calling script scope.
             Set-Item Function:Assert-True -Value $Check
             Set-Item Function:Assert-Throws -Value $ExpectFailure
-            $script:PDLogPath=$null; $script:PDDriverMock=@{ Driver=$null; Stages=0; Registered=0; MajorVersion=3; StageCode=0; Inf=$InfPath }
+            $script:PDLogPath=$null; $script:PDDriverMock=@{ Driver=$null; Stages=0; Registered=0; MajorVersion=3; StageCode=0; StageOutput='Staged'; Inf=$InfPath }
             function script:Import-Module { [CmdletBinding()]param($Name) }
             function script:Get-PrinterDriver { [CmdletBinding()]param() if ($script:PDDriverMock.Driver) { $script:PDDriverMock.Driver } }
-            function script:Invoke-PDDriverStaging { param($InfPath) $script:PDDriverMock.Stages++; [pscustomobject]@{ ExitCode=$script:PDDriverMock.StageCode; Output='Staged' } }
+            function script:Invoke-PDDriverStaging { param($InfPath) $script:PDDriverMock.Stages++; [pscustomobject]@{ ExitCode=$script:PDDriverMock.StageCode; Output=$script:PDDriverMock.StageOutput } }
             function script:Get-WindowsDriver { [CmdletBinding()]param([switch]$Online,[switch]$All) [pscustomobject]@{ ClassName='Printer'; OriginalFileName=$script:PDDriverMock.Inf } }
             function script:Add-PrinterDriver { [CmdletBinding()]param($Name,$InfPath) $script:PDDriverMock.Registered++; $script:PDDriverMock.Driver=[pscustomobject]@{ Name=$Name; MajorVersion=$script:PDDriverMock.MajorVersion } }
             $printer=[pscustomobject]@{ Kind='Type3'; DriverName='Legacy'; InfPath='Drivers\vendor\type3-valid.inf' }
@@ -443,6 +443,9 @@ Model="Test Printer v4"
             $printer.Kind='Type4'; Assert-Throws { Install-PDPackagedDriver $printer $Root } 'not a Type 4'
             $script:PDDriverMock.Driver=$null; $printer.Kind='Type3'; $script:PDDriverMock.MajorVersion=4
             Assert-Throws { Install-PDPackagedDriver $printer $Root } 'Type 3 driver registration failed'
+            $script:PDDriverMock.Driver=$null; $script:PDDriverMock.StageCode=-536870334
+            $script:PDDriverMock.StageOutput='The publisher of an Authenticode(tm) signed catalog has not yet been established as trusted.'
+            Assert-Throws { Install-PDPackagedDriver $printer $Root } 'Driver staging failed.*publisher.*trusted'
             $script:PDDriverMock.Driver=$null; $script:PDDriverMock.StageCode=3010
             Assert-Throws { Install-PDPackagedDriver $printer $Root } 'requires a restart'
         } (Join-Path $packagePath 'type3-valid.inf') $tempRoot (Get-Command Assert-True).ScriptBlock (Get-Command Assert-Throws).ScriptBlock
@@ -547,6 +550,43 @@ Model="Test Printer v4"
         $count = $global:PDMock.Events.Count
         Assert-Throws { Invoke-PDDeployment -ConfigPath $deploymentFile -RetryCount 1 } 'full IPP URL'
         Assert-True ($count -eq $global:PDMock.Events.Count -and 'Old Copy' -in $global:PDMock.Printers.Name) 'Invalid configuration caused changes.'
+    }
+    Test-Case 'Every IPP queue installs before vendor staging, survives driver failure and reports installed' {
+        $config=New-PDConfiguration
+        $tcp=New-TestPrinter 'Vendor after IPP' 'Type4'; $tcp.Address='192.0.2.70'; $tcp.PackagePath='Drivers\vendor'; $tcp.InfPath='Drivers\vendor\printer.inf'; $tcp.DriverName='Test Printer v4'
+        $ipp1=New-TestPrinter 'IPP before vendor 1'; $ipp2=New-TestPrinter 'IPP before vendor 2'
+        # Deliberately put the vendor queue first to verify order is independent of the configuration.
+        $config.Printers=@($tcp,$ipp1,$ipp2); $config.Cleanup.LegacyPrinterNames=@('Retired queue during vendor failure')
+        $global:PDMock.Printers += [pscustomobject]@{ Name='Retired queue during vendor failure'; Type='Local'; DriverName='Old'; PortName='Old'; Location=''; Comment='' }
+        Write-PDJson $config $deploymentFile; $before=$global:PDMock.Events.Count
+        Invoke-PDDeployment $deploymentFile -WhatIf -RetryCount 1
+        Assert-True ($before -eq $global:PDMock.Events.Count) 'Mixed WhatIf changed queues or drivers.'
+        $global:PDMock.DriverFailure=$true
+        try {
+            Assert-Throws { Invoke-PDDeployment $deploymentFile -RetryCount 1 } 'Mock driver staging failure'
+            $events=@($global:PDMock.Events | Select-Object -Skip $before)
+            foreach ($ipp in @($ipp1,$ipp2)) {
+                Assert-True ([array]::IndexOf($events,('Add:'+$ipp.Name)) -ge 0 -and [array]::IndexOf($events,('Add:'+$ipp.Name)) -lt [array]::IndexOf($events,('Driver:'+$tcp.DriverName))) 'Vendor staging preceded an IPP queue.'
+                Assert-True (@($global:PDMock.Printers | Where-Object { $_.Name -eq $ipp.Name }).Count -eq 1) 'Driver failure lost an installed IPP queue.'
+            }
+            Assert-True ($tcp.Name -notin $global:PDMock.Printers.Name -and 'Retired queue during vendor failure' -in $global:PDMock.Printers.Name) 'Driver failure installed its queue or performed cleanup.'
+            $report=@(Get-PDClientReports $tempRoot $config.DeploymentId)[0]
+            Assert-True ($report.Result -eq 'Failed' -and @($report.ConfiguredPrinters | Where-Object { $_.Status -eq 'Installed' }).Count -eq 2 -and @($report.ConfiguredPrinters | Where-Object { $_.Name -eq $tcp.Name -and $_.Status -eq 'Missing' }).Count -eq 1) 'Partial success was not represented accurately.'
+            Assert-Throws { Invoke-PDDeployment $deploymentFile -RetryCount 1 } 'Mock driver staging failure'
+            Assert-True (@($global:PDMock.Events | Select-Object -Skip $before | Where-Object { $_ -like 'Add:IPP before vendor*' }).Count -eq 2) 'Retry duplicated successful IPP queues.'
+        } finally { $global:PDMock.DriverFailure=$false }
+        Invoke-PDDeployment $deploymentFile -RetryCount 1
+        Assert-True ($tcp.Name -in $global:PDMock.Printers.Name -and 'Retired queue during vendor failure' -notin $global:PDMock.Printers.Name) 'Retry did not finish vendor deployment and deferred cleanup.'
+    }
+    Test-Case 'IPP installation failure still attempts vendor queues and reports both outcomes' {
+        $config=New-PDConfiguration; $ipp=New-TestPrinter 'Unavailable early IPP'; $tcp=New-TestPrinter 'Vendor despite IPP failure' 'Type4'
+        $tcp.Address='192.0.2.71'; $tcp.PackagePath='Drivers\vendor'; $tcp.InfPath='Drivers\vendor\printer.inf'; $tcp.DriverName='Test Printer v4'
+        $config.Printers=@($tcp,$ipp); Write-PDJson $config $deploymentFile
+        $global:PDMock.IppFailure=$true
+        try { Assert-Throws { Invoke-PDDeployment $deploymentFile -RetryCount 1 } 'Mock IPP unavailable' }
+        finally { $global:PDMock.IppFailure=$false }
+        $report=@(Get-PDClientReports $tempRoot $config.DeploymentId)[0]
+        Assert-True ($tcp.Name -in $global:PDMock.Printers.Name -and $report.Result -eq 'Failed' -and @($report.ConfiguredPrinters | Where-Object { $_.Name -eq $tcp.Name -and $_.Status -eq 'Installed' }).Count -eq 1) 'Failed IPP queue blocked vendor installation or lost its report status.'
     }
     Test-Case 'Driver failure aborts legacy cleanup; success installs Type4 and reuses its port' {
         $typeConfig = New-PDConfiguration; $p = New-TestPrinter 'TCP Printer' 'Type4'; $p.Address = '192.0.2.55'

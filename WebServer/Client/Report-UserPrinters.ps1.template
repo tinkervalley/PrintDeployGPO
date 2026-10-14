@@ -1,0 +1,14 @@
+#requires -Version 5.1
+# Optional USER logon GPO script. Reports/removes user connections; creates no task.
+$ErrorActionPreference='Stop'
+__TRANSPORT__
+try {
+    $server=__SERVER__; $publicKey=__PUBLIC_KEY__; $deploymentId='__DEPLOYMENT_ID__'
+    $clientId=Get-PDWClientId $deploymentId -UserMode
+    $root=Join-Path $env:LOCALAPPDATA ('PrintDeployWeb\'+$deploymentId); Initialize-PDWCache $root -UserMode
+    $nonce=[guid]::NewGuid().ToString('N'); $manifest=Get-PDWResponse $server ('/client/bootstrap?nonce='+$nonce) $publicKey $nonce $deploymentId
+    Update-PDWFiles $server $root $manifest
+    [pscustomobject]@{ Server=$server; PublicKey=$publicKey; DeploymentId=$deploymentId; ClientId=$clientId } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $root 'settings.json') -Encoding UTF8
+    & (Join-Path $root 'client\Invoke-PrintDeployWeb.ps1') -SettingsPath (Join-Path $root 'settings.json') -Mode CleanupUser
+    exit $LASTEXITCODE
+} catch { Write-Error $_; exit 1 }

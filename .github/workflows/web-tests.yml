@@ -1,0 +1,55 @@
+name: Web server verification
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build and test server models
+        run: dotnet run --project WebServer/Tests/PrintDeploy.Web.Tests.csproj
+      - name: Exercise HTTP delivery and package inspection
+        shell: pwsh
+        run: |
+          $env:PD_WEB_FIXTURE_OUTPUT = Join-Path $env:RUNNER_TEMP 'web-fixtures'
+          $env:PD_WEB_POWERSHELL = if ($IsWindows) { Join-Path $env:windir 'System32/WindowsPowerShell/v1.0/powershell.exe' } else { 'pwsh' }
+          python WebServer/Tests/HttpTests.py
+          if ($LASTEXITCODE -ne 0) { throw 'HTTP integration checks failed.' }
+      - name: Verify transport in Windows PowerShell 5.1
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\WebServer\Tests\TransportTests.ps1 -FixtureDirectory (Join-Path $env:RUNNER_TEMP 'web-fixtures')
+      - name: Verify transport in PowerShell on Linux
+        if: runner.os == 'Linux'
+        shell: pwsh
+        run: ./WebServer/Tests/TransportTests.ps1 -FixtureDirectory (Join-Path $env:RUNNER_TEMP 'web-fixtures')
+      - name: Publish self-contained Windows service
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./WebServer/scripts/Publish-Server.ps1 -Runtime win-x64
+          Copy-Item WebServer/README.md WebServer/dist/win-x64/README.md
+          Compress-Archive -Path WebServer/dist/win-x64/* -DestinationPath WebServer/dist/PrintDeployWeb-Windows-x64.zip
+      - uses: actions/upload-artifact@v7.0.2
+        if: runner.os == 'Windows'
+        with:
+          name: PrintDeployWeb-Windows-x64
+          path: WebServer/dist/PrintDeployWeb-Windows-x64.zip
+          retention-days: 30

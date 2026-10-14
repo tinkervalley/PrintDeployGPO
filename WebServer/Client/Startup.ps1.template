@@ -1,0 +1,25 @@
+#requires -Version 5.1
+# Generated standalone GPO startup script. Sign it if required by your domain policy.
+[CmdletBinding()]
+param()
+$ErrorActionPreference='Stop'
+__TRANSPORT__
+try {
+    if ($env:OS -ne 'Windows_NT' -or -not [Environment]::Is64BitProcess) { throw 'Use native 64-bit Windows PowerShell.' }
+    $principal=New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Startup requires SYSTEM or an elevated administrator.' }
+    $server=__SERVER__; $publicKey=__PUBLIC_KEY__; $deploymentId='__DEPLOYMENT_ID__'
+    $root=Join-Path $env:ProgramData ('PrintDeployWeb\'+$deploymentId); Initialize-PDWCache $root
+    $mutex=New-Object Threading.Mutex($false,('Global\PrintDeployWeb-Update-'+$deploymentId)); $locked=$false
+    try {
+        try { $locked=$mutex.WaitOne(60000) } catch [Threading.AbandonedMutexException] { $locked=$true }; if (-not $locked) { throw 'Another client update is running.' }
+        $clientId=Get-PDWClientId $deploymentId; $nonce=[guid]::NewGuid().ToString('N')
+        $manifest=Get-PDWResponse $server ('/client/bootstrap?nonce='+$nonce) $publicKey $nonce $deploymentId
+        Update-PDWFiles $server $root $manifest
+        $settings=[pscustomobject]@{ Server=$server; PublicKey=$publicKey; DeploymentId=$deploymentId; ClientId=$clientId; PollMinutes=$manifest.Task.PollMinutes }
+        $settings | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $root 'settings.json') -Encoding UTF8
+        Register-PDWTask $server $root $deploymentId $manifest.Task
+        Write-Output ('Registered '+$manifest.Task.Name+'. First run in about one minute; subsequent runs poll the server.')
+    } finally { if ($locked) { $mutex.ReleaseMutex() }; $mutex.Dispose() }
+    exit 0
+} catch { Write-Error $_; exit 1 }

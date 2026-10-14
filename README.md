@@ -2,6 +2,10 @@
 
 A printer deployment tool with native Windows and Mac configuration GUIs and a Windows PowerShell 5.1 deployment engine for silent, repeatable GPO deployment. It installs machine-wide queues for all users, without a print server. Supports driverless IPP/IPPS and signed Type 3/Type 4 TCP/IP driver packages. There are no external PowerShell module dependencies beyond the Windows inbox PrintManagement and DISM modules.
 
+## Web server edition
+
+The separate [PrintDeploy Web edition](WebServer/README.md) hosts a browser UI as a Windows service on port 3000, with Active Directory OU targeting, HTTP delivery of printer configurations and packages, and centralized client reports. It generates a GPO bootstrap for one SYSTEM scheduled task and uses Windows authentication for administrators. The existing share-based tools remain available below.
+
 ## Configure
 
 1. Copy this project to a Windows administrator workstation. Run `Launch-Configurator.cmd`, or:

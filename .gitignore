@@ -17,3 +17,16 @@ StartupProfileData-*
 # Native Mac build outputs
 /MacConfigurator/build/
 /MacConfigurator/dist/
+
+# Separate web server build outputs, local database, keys and uploaded packages
+/WebServer/**/bin/
+/WebServer/**/obj/
+/WebServer/dist/
+/WebServer/Data/
+/WebServer/Server/appsettings.Local.json
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Python test caches
+__pycache__/

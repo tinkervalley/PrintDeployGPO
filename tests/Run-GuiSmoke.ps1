@@ -47,7 +47,7 @@ try {
     Assert-Gui ($editorResult.Count -eq 1 -and $editorResult[0] -is [System.Windows.Forms.Form]) 'Printer editor emitted values other than its Form.'
     $editor = $editorResult[0]; $forms.Add($editor)
     $editorChildren = @(Get-GuiChildren $editor)
-    $kind = @($editorChildren | Where-Object { $_ -is [System.Windows.Forms.ComboBox] -and $_.Items.Contains('Type4') })[0]
+    $kind = @($editorChildren | Where-Object { $_ -is [System.Windows.Forms.ComboBox] -and $_.Items.Contains('IPP') })[0]
     $port = @($editorChildren | Where-Object { $_ -is [System.Windows.Forms.NumericUpDown] })[0]
     Assert-Gui (-not $port.Enabled) 'IPP mode did not disable RAW port controls.'
     $kind.SelectedItem = 'Type4'
@@ -113,11 +113,28 @@ Vendor=Models,NTamd64,NTarm64
     Assert-Gui ($driverControl.Items.Contains('Shared model') -and $driverControl.Items.Contains('ARM-only model') -and $support.Text -match 'ARM64' -and $support.Text -notmatch 'x64,') 'ARM-only driver support was not displayed.'
     $driverControl.SelectedItem='Shared model'
     Assert-Gui ($support.Text -match 'x64, ARM64') 'Driver selection did not update architecture support.'
-    $connection=($fields | Where-Object { $_ -is [System.Windows.Forms.ComboBox] -and $_.Items.Contains('Type4') }); $connection.SelectedItem='IPP'; $connection.SelectedItem='Type4'
+    $connection=($fields | Where-Object { $_ -is [System.Windows.Forms.ComboBox] -and $_.Items.Contains('IPP') }); $connection.SelectedItem='IPP'; $connection.SelectedItem='Type4'
     Assert-Gui ($support.Text -match 'x64, ARM64') 'Connection switching lost the selected driver support label.'
     Invoke-GuiButton ($fields | Where-Object { $_ -is [System.Windows.Forms.Button] -and $_.Text -eq 'Save printer' })
     Assert-Gui ($driverEditor.Tag.Result.DriverName -eq 'Shared model') 'Detected driver could not be saved.'
     Write-Host 'PASS Driver editor detects both architectures and updates support for each selected model.'
+
+    (Get-Content (Join-Path $driverFolder 'printer.inf') -Raw).Replace('ClassVer=4.0','') | Set-Content (Join-Path $driverFolder 'legacy.inf') -Encoding Unicode
+    $nativePrinter=[pscustomobject]@{ Name='One native queue'; Kind='Type4'; Address='192.0.2.60'; PortNumber=9100; Location=''; Comment=''; PackagePath=''; InfPath=''; DriverName=''; DriverPackages=[pscustomobject]@{
+        x64=[pscustomobject]@{ Kind='Type3'; PackagePath='Drivers\test'; InfPath='Drivers\test\legacy.inf'; DriverName='Shared model' }
+        ARM64=[pscustomobject]@{ Kind='Type4'; PackagePath='Drivers\test'; InfPath='Drivers\test\printer.inf'; DriverName='ARM-only model' }
+    } }
+    $nativeEditor=New-PDPrinterEditorForm -Printer $nativePrinter -Root $tempRoot -Owner $form; $forms.Add($nativeEditor)
+    $fields=@(Get-GuiChildren $nativeEditor); $target=($fields | Where-Object { $_.Name -eq 'DriverPackageTarget' }); $type=($fields | Where-Object { $_.Name -eq 'DriverPackageKind' }); $driver=($fields | Where-Object { $_.Name -eq 'DriverModel' })
+    Assert-Gui ($target.SelectedItem -eq 'x64' -and $type.SelectedItem -eq 'Type3' -and $driver.Items.Count -eq 1) 'x64 package did not load or offered an ARM-only model.'
+    $target.SelectedItem='ARM64'
+    Assert-Gui ($type.SelectedItem -eq 'Type4' -and $driver.SelectedItem -eq 'ARM-only model') 'ARM64 package was overwritten by the x64 slot.'
+    $driver.SelectedItem='Shared model'; $target.SelectedItem='x64'; $target.SelectedItem='ARM64'
+    Assert-Gui ($driver.SelectedItem -eq 'Shared model' -and $nativePrinter.DriverPackages.ARM64.DriverName -eq 'ARM-only model') 'Switching slots lost edits or changed the original configuration before Save.'
+    Invoke-GuiButton ($fields | Where-Object { $_ -is [System.Windows.Forms.Button] -and $_.Text -eq 'Save printer' })
+    $saved=$nativeEditor.Tag.Result
+    Assert-Gui ($saved.Name -eq $nativePrinter.Name -and $saved.DriverName -eq '' -and $saved.DriverPackages.x64.Kind -eq 'Type3' -and $saved.DriverPackages.ARM64.Kind -eq 'Type4' -and $saved.DriverPackages.ARM64.DriverName -eq 'Shared model') 'Saving did not preserve independent native driver packages on one queue.'
+    Write-Host 'PASS One printer preserves separate x64 and ARM64 driver types, packages and selections.'
 
     $config = New-PDConfiguration
     $sample = Read-PDConfiguration (Join-Path $projectRoot 'examples\printers.ipp.json')

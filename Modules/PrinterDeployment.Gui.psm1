@@ -116,7 +116,7 @@ function New-PDPrinterEditorForm {
     for ($row = 0; $row -lt 12; $row++) { [void]$layout.RowStyles.Add((New-Object Windows.Forms.RowStyle('AutoSize'))) }
     $dialog.Controls.Add($layout)
     $name = New-Object Windows.Forms.TextBox; $name.Name = 'PrinterName'
-    $kind = New-Object Windows.Forms.ComboBox; $kind.DropDownStyle = 'DropDownList'; $kind.Items.AddRange(@('IPP','Type4','Type3'))
+    $kind = New-Object Windows.Forms.ComboBox; $kind.Name = 'ConnectionKind'; $kind.DropDownStyle = 'DropDownList'; $kind.Items.AddRange(@('IPP','Type4','Type3'))
     $address = New-Object Windows.Forms.TextBox; $address.Name = 'PrinterHost'
     $protocol = New-Object Windows.Forms.ComboBox; $protocol.Name = 'IppProtocol'; $protocol.DropDownStyle = 'DropDownList'; $protocol.Items.AddRange(@('ipp','ipps')); $protocol.SelectedIndex = 0
     $subpath = New-Object Windows.Forms.TextBox; $subpath.Name = 'IppSubpath'; $subpath.Text = '/ipp'
@@ -125,11 +125,16 @@ function New-PDPrinterEditorForm {
     $portPanel = New-Object Windows.Forms.FlowLayoutPanel; $portPanel.AutoSize = $true; $portPanel.Controls.AddRange(@($customPort, $port))
     $location = New-Object Windows.Forms.TextBox; $comment = New-Object Windows.Forms.TextBox
     $package = New-Object Windows.Forms.TextBox; $package.ReadOnly = $true
+    $packageTarget = New-Object Windows.Forms.ComboBox; $packageTarget.Name='DriverPackageTarget'; $packageTarget.DropDownStyle='DropDownList'; $packageTarget.Items.AddRange(@('Shared/default','x64','ARM64')); $packageTarget.SelectedIndex=0
+    $packageKind = New-Object Windows.Forms.ComboBox; $packageKind.Name='DriverPackageKind'; $packageKind.DropDownStyle='DropDownList'; $packageKind.Items.AddRange(@('Type4','Type3')); $packageKind.SelectedIndex=0
+    $packagePanel=New-Object Windows.Forms.TableLayoutPanel; $packagePanel.AutoSize=$true; $packagePanel.ColumnCount=1; $packagePanel.RowCount=2
+    $packageToolbar=New-Object Windows.Forms.FlowLayoutPanel; $packageToolbar.AutoSize=$true
+    $packageToolbar.Controls.AddRange(@($packageTarget,$packageKind)); $packagePanel.Controls.Add($packageToolbar,0,0); $package.Dock='Fill'; $packagePanel.Controls.Add($package,0,1)
     $model = New-Object Windows.Forms.ComboBox; $model.Name = 'DriverModel'; $model.DropDownStyle = 'DropDownList'
     $hint = New-Object Windows.Forms.Label; $hint.Name = 'DriverSupport'; $hint.AutoSize = $true; $hint.MaximumSize = '590,0'
     $hint.Text = 'Enter an IP address or hostname. IPP/IPPS use port 631 automatically; enable a custom port if needed (for example 443). IPPS requires a trusted certificate matching the hostname.'
     $labels = @('Printer name', 'Connection type', 'IP address / hostname', 'IPP protocol', 'IPP subpath', 'Port', 'Location', 'Comment', 'Packaged INF', 'Detected driver name')
-    $controls = @($name, $kind, $address, $protocol, $subpath, $portPanel, $location, $comment, $package, $model)
+    $controls = @($name, $kind, $address, $protocol, $subpath, $portPanel, $location, $comment, $packagePanel, $model)
     $fieldLabels = @()
     for ($i = 0; $i -lt $controls.Count; $i++) {
         $fieldLabel = New-PDLabel $labels[$i]; $fieldLabels += $fieldLabel
@@ -140,7 +145,44 @@ function New-PDPrinterEditorForm {
     $buttons = New-Object Windows.Forms.FlowLayoutPanel; $buttons.Dock = 'Fill'; $buttons.AutoSize = $true
     $layout.Controls.Add($buttons, 1, 11)
     # Mutable dialog data is captured by event-handler closures.
-    $data = @{ PackagePath = ''; InfPath = ''; Result = $null; OriginalAddress = ''; OriginalParts = $null; TcpPort = 9100; IppPort = 631; PreviousKind = ''; DriverCatalog = @() }
+    $data = @{ PackagePath = ''; InfPath = ''; Result = $null; OriginalAddress = ''; OriginalParts = $null; TcpPort = 9100; IppPort = 631; PreviousKind = ''; DriverCatalog = @(); Slots=@{}; Target='Shared/default'; LoadingSlot=$false }
+    $storeSlot = {
+        if ($data.LoadingSlot) { return }
+        $value = if ($data.Slots.ContainsKey($data.Target)) { $data.Slots[$data.Target] } else { [pscustomobject]@{ Kind='Type4'; PackagePath=''; InfPath=''; DriverName='' } }
+        if (-not $value.PSObject.Properties['Kind']) { $value | Add-Member -NotePropertyName Kind -NotePropertyValue ([string]$kind.SelectedItem) }
+        $value.Kind=[string]$packageKind.SelectedItem; $value.PackagePath=$data.PackagePath; $value.InfPath=$data.InfPath; $value.DriverName=[string]$model.SelectedItem
+        $data.Slots[$data.Target]=$value
+    }.GetNewClosure()
+    $loadSlot = {
+        $data.LoadingSlot=$true
+        try {
+            $value = if ($data.Slots.ContainsKey($data.Target)) { $data.Slots[$data.Target] } else { [pscustomobject]@{ Kind=[string]$kind.SelectedItem; PackagePath=''; InfPath=''; DriverName='' } }
+            $selectedKind=if ($data.Target -eq 'Shared/default' -or -not $value.PSObject.Properties['Kind']) { [string]$kind.SelectedItem } else { $value.Kind }
+            $packageKind.SelectedItem=$selectedKind; $packageKind.Enabled=$data.Target -ne 'Shared/default'
+            $data.PackagePath=$value.PackagePath; $data.InfPath=$value.InfPath; $package.Text=$value.InfPath
+            $model.Items.Clear(); $data.DriverCatalog=@()
+            if ($value.InfPath) {
+                try {
+                    $data.DriverCatalog=@(Get-PDInfDriverCatalog (Resolve-PDResource $Root $value.InfPath) -DriverType ([int]$selectedKind.Substring(4)) | Where-Object { $data.Target -eq 'Shared/default' -or $data.Target -in $_.Architectures })
+                    $model.Items.AddRange([object[]]@($data.DriverCatalog | ForEach-Object { $_.Name }))
+                    $selected=@($data.DriverCatalog | Where-Object { $_.Name -eq $value.DriverName })
+                    if ($selected.Count) { $model.SelectedItem=$selected[0].Name }
+                    else { $hint.Text='Select a model compatible with this package target.' }
+                } catch { $hint.Text='Package needs attention: ' + $_.Exception.Message }
+            } else { $hint.Text='No package for ' + $data.Target + '. Import a package or use the shared/default fallback.' }
+        } finally { $data.LoadingSlot=$false }
+    }.GetNewClosure()
+    $packageTarget.Add_SelectedIndexChanged({
+        if ($data.LoadingSlot) { return }; & $storeSlot; $data.Target=[string]$packageTarget.SelectedItem; & $loadSlot
+    }.GetNewClosure())
+    $packageKind.Add_SelectedIndexChanged({
+        if ($data.LoadingSlot) { return }
+        $data.Slots[$data.Target]=[pscustomobject]@{ Kind=[string]$packageKind.SelectedItem; PackagePath=''; InfPath=''; DriverName='' }; & $loadSlot
+    }.GetNewClosure())
+    $clearPackage=New-PDButton 'Clear this package' ({
+        $data.Slots[$data.Target]=[pscustomobject]@{ Kind=[string]$packageKind.SelectedItem; PackagePath=''; InfPath=''; DriverName='' }; & $loadSlot
+    }.GetNewClosure())
+    $packageToolbar.Controls.Add($clearPackage)
     $import = New-PDButton 'Import driver package...' $null
     $import.Add_Click({
         try {
@@ -150,18 +192,19 @@ function New-PDPrinterEditorForm {
             try { if ($folder.ShowDialog($dialog) -ne 'OK') { return }; $source = $folder.SelectedPath }
             finally { $folder.Dispose() }
             $choose = New-Object Windows.Forms.OpenFileDialog
-            $choose.Title = 'Select the ' + $kind.SelectedItem + ' INF inside this package'; $choose.Filter = 'Driver INF (*.inf)|*.inf'; $choose.InitialDirectory = $source
+            $choose.Title = 'Select the ' + $packageKind.SelectedItem + ' INF inside this package'; $choose.Filter = 'Driver INF (*.inf)|*.inf'; $choose.InitialDirectory = $source
             try { if ($choose.ShowDialog($dialog) -ne 'OK') { return }; $inf = $choose.FileName }
             finally { $choose.Dispose() }
             if (-not $inf.StartsWith($source.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Select an INF inside the package folder.' }
-            $data.DriverCatalog = @(Get-PDInfDriverCatalog -Path $inf -DriverType ([int]([string]$kind.SelectedItem).Substring(4)))
+            $data.DriverCatalog = @(Get-PDInfDriverCatalog -Path $inf -DriverType ([int]([string]$packageKind.SelectedItem).Substring(4)) | Where-Object { $data.Target -eq 'Shared/default' -or $data.Target -in $_.Architectures })
+            if (-not $data.DriverCatalog.Count) { throw 'This INF has no models for the selected package target.' }
             $models = @($data.DriverCatalog | ForEach-Object { $_.Name })
             $relativePackage = 'Drivers\' + [guid]::NewGuid().ToString('N')
             $destination = Resolve-PDResource $Root $relativePackage
             Copy-PDPackage $source $destination
             $data.PackagePath = $relativePackage
             $data.InfPath = $relativePackage + '\' + $inf.Substring($source.TrimEnd('\').Length + 1)
-            $package.Text = $data.InfPath; $model.Items.Clear(); $model.Items.AddRange([object[]]$models); $model.SelectedIndex = 0
+            $package.Text = $data.InfPath; $model.Items.Clear(); $model.Items.AddRange([object[]]$models); $model.SelectedIndex = 0; & $storeSlot
         } catch { Show-PDError $_ }
     }.GetNewClosure())
     $save = New-PDButton 'Save printer' $null
@@ -178,12 +221,17 @@ function New-PDPrinterEditorForm {
                     $printerAddress = New-PDIppAddress -HostName $printerAddress -Protocol $protocol.SelectedItem -Subpath $subpath.Text -PortNumber ([int]$port.Value)
                 }
             }
+            & $storeSlot
+            $shared=if ($data.Slots.ContainsKey('Shared/default')) { $data.Slots['Shared/default'] } else { [pscustomobject]@{ PackagePath=''; InfPath=''; DriverName='' } }
             $result = [pscustomobject][ordered]@{
                 Name = $name.Text.Trim(); Kind = [string]$kind.SelectedItem; Address = $printerAddress
                 PortNumber = [int]$port.Value; Location = $location.Text.Trim(); Comment = $comment.Text.Trim()
-                PackagePath = $data.PackagePath; InfPath = $data.InfPath; DriverName = [string]$model.SelectedItem
+                PackagePath = $shared.PackagePath; InfPath = $shared.InfPath; DriverName = $shared.DriverName
             }
-            $testConfig = New-PDConfiguration; $testConfig.Printers = @($result)
+            $variants=[ordered]@{}
+            if ($result.Kind -ne 'IPP') { foreach ($target in @('x64','ARM64')) { if ($data.Slots.ContainsKey($target)) { $slot=$data.Slots[$target]; if ($slot.PackagePath -or $slot.InfPath -or $slot.DriverName) { $variants[$target]=$slot } } } }
+            if ($variants.Count) { $result | Add-Member -NotePropertyName DriverPackages -NotePropertyValue ([pscustomobject]$variants) }
+            $testConfig = New-PDConfiguration; if ($variants.Count) { $testConfig.SchemaVersion=2 }; $testConfig.Printers = @($result)
             Assert-PDConfiguration $testConfig $Root
             $data.Result = $result; $dialog.DialogResult = 'OK'; $dialog.Close()
         } catch { Show-PDError $_ }
@@ -192,9 +240,8 @@ function New-PDPrinterEditorForm {
     $buttons.Controls.AddRange(@($import, $save, $cancel)); $dialog.AcceptButton = $save; $dialog.CancelButton = $cancel
     $kind.Add_SelectedIndexChanged({
         $tcp = $kind.SelectedItem -in @('Type3','Type4')
-        if ($tcp -and $data.PreviousKind -in @('Type3','Type4') -and $data.PreviousKind -ne [string]$kind.SelectedItem) {
-            $data.PackagePath = ''; $data.InfPath = ''; $data.DriverCatalog = @(); $package.Text = ''; $model.Items.Clear()
-        }
+        if ($data.PreviousKind -in @('Type3','Type4')) { & $storeSlot }
+        if ($tcp -and $data.PreviousKind -in @('Type3','Type4') -and $data.PreviousKind -ne [string]$kind.SelectedItem) { $data.Slots.Remove('Shared/default') }
         foreach ($row in @(3,4,8,9)) {
             $visible = if ($row -lt 5) { -not $tcp } else { $tcp }
             $controls[$row].Visible = $visible; $fieldLabels[$row].Visible = $visible
@@ -211,7 +258,8 @@ function New-PDPrinterEditorForm {
                 else { 'Import a package and select a driver to see its declared x64/ARM64 model support.' }
         }
         else { $hint.Text = 'IPP/IPPS work on x64 and ARM64 without a vendor driver package. Port 631 is automatic. IPPS requires a trusted certificate matching the hostname.' }
-        $port.Enabled = $tcp -or $customPort.Checked; $model.Enabled = $tcp; $package.Enabled = $tcp; $import.Enabled = $tcp; $import.Visible = $tcp
+        $port.Enabled = $tcp -or $customPort.Checked; $model.Enabled = $tcp; $packagePanel.Enabled = $tcp; $import.Enabled = $tcp; $import.Visible = $tcp
+        if ($tcp) { & $loadSlot }
     }.GetNewClosure())
     $customPort.Add_CheckedChanged({
         $port.Enabled = $kind.SelectedItem -in @('Type3','Type4') -or $customPort.Checked
@@ -236,15 +284,14 @@ function New-PDPrinterEditorForm {
             $customPort.Checked = $parts.PortNumber -ne (Get-PDIppDefaultPort $parts.Protocol); $port.Value = $parts.PortNumber
         } else { $port.Value = $Printer.PortNumber }
         $location.Text = $Printer.Location; $comment.Text = $Printer.Comment
-        $data.PackagePath = $Printer.PackagePath; $data.InfPath = $Printer.InfPath; $package.Text = $Printer.InfPath
+        $data.Slots['Shared/default']=[pscustomobject]@{ Kind=$Printer.Kind; PackagePath=$Printer.PackagePath; InfPath=$Printer.InfPath; DriverName=$Printer.DriverName }
+        if ($Printer.PSObject.Properties['DriverPackages']) { foreach ($property in $Printer.DriverPackages.PSObject.Properties) { $data.Slots[$property.Name]=($property.Value | ConvertTo-Json -Depth 12 | ConvertFrom-Json) } }
         if ($Printer.Kind -in @('Type3','Type4')) {
-            try {
-                $data.DriverCatalog = @(Get-PDInfDriverCatalog (Resolve-PDResource $Root $Printer.InfPath) -DriverType ([int]$Printer.Kind.Substring(4)))
-                $models = @($data.DriverCatalog | ForEach-Object { $_.Name })
-                $model.Items.AddRange([object[]]$models)
-                $selected=@($data.DriverCatalog | Where-Object { $_.Name -eq $Printer.DriverName })
-                if ($selected.Count) { $model.SelectedItem = $selected[0].Name }
-            } catch { Show-PDError $_ }
+            if (-not $Printer.DriverName) {
+                $first=@('x64','ARM64' | Where-Object { $data.Slots.ContainsKey($_) })
+                if ($first.Count) { $data.LoadingSlot=$true; $data.Target=$first[0]; $packageTarget.SelectedItem=$first[0]; $data.LoadingSlot=$false }
+            }
+            & $loadSlot
         }
     }
     $dialog.Tag = $data
@@ -520,7 +567,7 @@ function New-PDConfigurationForm {
     $refresh = {
         $grid.Rows.Clear()
         foreach ($p in @($data.Config.Printers)) {
-            $driverText = if ($p.Kind -eq 'IPP') { 'Microsoft IPP Class Driver' } else { $p.DriverName }
+            $driverText = Get-PDPrinterDriverSummary $p
             $index = $grid.Rows.Add([object[]]@($p.Name, $p.Kind, $p.Address, $driverText, $p.Location)); $grid.Rows[$index].Tag = $p
         }
         $rootBox.Text = $data.Root; $guide.Text = Get-PDGpoGuide $data.Root
@@ -530,6 +577,7 @@ function New-PDConfigurationForm {
         $legacy.Lines = [string[]]@($data.Config.Cleanup.LegacyPrinterNames)
     }.GetNewClosure()
     $sync = {
+        if (@($data.Config.Printers | Where-Object { $_.PSObject.Properties['DriverPackages'] }).Count) { $data.Config.SchemaVersion=2 }
         $data.Config.Cleanup.RemoveStaleManaged = $stale.Checked; $data.Config.Cleanup.CleanupUserConnections = $user.Checked
         $data.Config.Cleanup.LegacyPrinterNames = @($legacy.Lines | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
     }.GetNewClosure()
@@ -555,9 +603,11 @@ function New-PDConfigurationForm {
             [void](Resolve-PDResource $chosen 'printers.json')
             # Move configurations by COPYING packages; keep the original deployment intact.
             if ($data.Root -and $data.Root.TrimEnd('\') -ne $chosen.TrimEnd('\')) {
-                foreach ($p in @($data.Config.Printers | Where-Object { $_.Kind -in @('Type3','Type4') } | Sort-Object PackagePath -Unique)) {
-                    Copy-PDPackage (Resolve-PDResource $data.Root $p.PackagePath) (Resolve-PDResource $chosen $p.PackagePath)
-                }
+                $packages=@($data.Config.Printers | Where-Object { $_.Kind -in @('Type3','Type4') } | ForEach-Object {
+                    if ($_.PackagePath) { $_ }
+                    if ($_.PSObject.Properties['DriverPackages']) { foreach ($property in $_.DriverPackages.PSObject.Properties) { $property.Value } }
+                } | Sort-Object PackagePath -Unique)
+                foreach ($p in $packages) { Copy-PDPackage (Resolve-PDResource $data.Root $p.PackagePath) (Resolve-PDResource $chosen $p.PackagePath) }
             }
             $data.Root = $chosen; $data.Dirty = $true; & $refresh
         } catch { Show-PDError $_ }

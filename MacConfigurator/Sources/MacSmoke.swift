@@ -47,6 +47,22 @@ enum MacSmoke {
         driverEditor.driver.selectItem(withTitle: "Shared"); driverEditor.driverChanged()
         guard driverEditor.support.stringValue.contains("x64, ARM64") else { throw DeploymentError("Native driver support did not update with selection.") }
         _ = try driverEditor.makePrinter(); driverEditor.dialog.close()
+        try Data(inf.replacingOccurrences(of: "ClassVer=4.0", with: "").utf8).write(to: vendor.appendingPathComponent("legacy.inf"))
+        var nativePrinter = driverPrinter; nativePrinter.merge(["PackagePath": "", "InfPath": "", "DriverName": "", "DriverPackages": [
+            "x64": ["Kind": "Type3", "PackagePath": "Drivers\\test", "InfPath": "Drivers\\test\\legacy.inf", "DriverName": "Shared"],
+            "ARM64": ["Kind": "Type4", "PackagePath": "Drivers\\test", "InfPath": "Drivers\\test\\printer.inf", "DriverName": "ARM-only"]
+        ]]) { _, new in new }
+        let nativeEditor = PrinterEditor(model: model, printer: nativePrinter)
+        guard nativeEditor.packageTarget.titleOfSelectedItem == "x64", nativeEditor.packageKind.titleOfSelectedItem == "Type3", nativeEditor.driver.itemTitles == ["Shared"] else { throw DeploymentError("Native x64 package or model filtering failed.") }
+        nativeEditor.packageTarget.selectItem(withTitle: "ARM64"); nativeEditor.packageTargetChanged()
+        guard nativeEditor.packageKind.titleOfSelectedItem == "Type4", nativeEditor.driver.titleOfSelectedItem == "ARM-only" else { throw DeploymentError("Native ARM64 slot was overwritten by x64.") }
+        nativeEditor.driver.selectItem(withTitle: "Shared"); nativeEditor.driverChanged()
+        nativeEditor.packageTarget.selectItem(withTitle: "x64"); nativeEditor.packageTargetChanged()
+        nativeEditor.packageTarget.selectItem(withTitle: "ARM64"); nativeEditor.packageTargetChanged()
+        let savedNative = try nativeEditor.makePrinter(), savedPackages = savedNative["DriverPackages"] as? JSON ?? [:]
+        guard nativeEditor.driver.titleOfSelectedItem == "Shared", text(savedPackages["x64"] as? JSON ?? [:], "Kind") == "Type3", text(savedPackages["ARM64"] as? JSON ?? [:], "Kind") == "Type4", text(savedNative, "DriverName").isEmpty else { throw DeploymentError("Native slot switching/save lost independent packages.") }
+        guard text((nativePrinter["DriverPackages"] as? JSON)?["ARM64"] as? JSON ?? [:], "DriverName") == "ARM-only" else { throw DeploymentError("Editing changed the original before saving.") }
+        nativeEditor.dialog.close()
         controller.window.contentView?.layoutSubtreeIfNeeded()
         if let directory = ProcessInfo.processInfo.environment["PD_MAC_SCREENSHOTS"] {
             let destination = URL(fileURLWithPath: directory); try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)

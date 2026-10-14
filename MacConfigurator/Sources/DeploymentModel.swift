@@ -96,7 +96,7 @@ final class DeploymentModel {
     var savedAt: Date?
     var dirty = false
     var warnings = [String]()
-    var printers: [JSON] { get { objects(config, "Printers") } set { config["Printers"] = newValue; dirty = true } }
+    var printers: [JSON] { get { objects(config, "Printers") } set { config["Printers"] = newValue; if newValue.contains(where: { $0["DriverPackages"] != nil }) { config["SchemaVersion"] = 2 }; dirty = true } }
     var removals: [JSON] { get { objects(config, "ClientRemovals") } set { config["ClientRemovals"] = newValue; dirty = true } }
     static func freshConfig() -> JSON {
         ["SchemaVersion": 1, "DeploymentId": UUID().uuidString.lowercased(), "Architecture": "x64", "Printers": [JSON](), "ClientRemovals": [JSON](),
@@ -127,15 +127,46 @@ final class DeploymentModel {
         guard current.standardizedFileURL.path.hasPrefix(base.path + "/") else { throw DeploymentError("Resource escapes the deployment folder.") }
         return current
     }
+    static func resolvedDriver(_ printer: JSON, architecture: String) -> JSON {
+        guard text(printer, "Kind") != "IPP", let variants = printer["DriverPackages"] as? JSON, let package = variants[architecture] as? JSON else { return printer }
+        var result = printer
+        for key in ["PackagePath", "InfPath", "DriverName"] { result[key] = package[key] }
+        if let kind = package["Kind"] { result["Kind"] = kind }
+        return result
+    }
+    static func driverSummary(_ printer: JSON) -> String {
+        if text(printer, "Kind") == "IPP" { return "Microsoft IPP Class Driver" }
+        var parts = [String]()
+        if !text(printer, "DriverName").isEmpty { parts.append("Shared: " + text(printer, "DriverName")) }
+        for architecture in ["x64", "ARM64"] {
+            if let package = (printer["DriverPackages"] as? JSON)?[architecture] as? JSON { parts.append(architecture + ": " + text(package, "DriverName")) }
+        }
+        return parts.joined(separator: "; ")
+    }
+    static func validatePackage(_ package: JSON, root: URL, kind: String, architecture: String? = nil, resources: Bool) throws {
+        let kind = package["Kind"] as? String ?? kind
+        guard ["Type3", "Type4"].contains(kind) else { throw DeploymentError("Package type must be Type3 or Type4.") }
+        for key in ["PackagePath", "InfPath", "DriverName"] { guard let value = package[key] as? String, !value.isEmpty else { throw DeploymentError("Missing driver package field: \(key)") } }
+        let packagePath = text(package, "PackagePath"), infPath = text(package, "InfPath"), driver = text(package, "DriverName")
+        guard matches(packagePath, "(?i)^Drivers[/\\\\]") else { throw DeploymentError("Driver packages must be under Drivers in the deployment folder.") }
+        let folder = try resource(root, packagePath), inf = try resource(root, infPath)
+        guard inf.path.hasPrefix(folder.path + "/"), inf.pathExtension.lowercased() == "inf" else { throw DeploymentError("INF must be inside its package.") }
+        if resources {
+            try rejectLinks(in: folder)
+            let catalog = try INFModels.catalog(inf, type: kind == "Type3" ? 3 : 4)
+            guard let entry = catalog.first(where: { same($0.name, driver) }) else { throw DeploymentError("Driver name is absent from the selected INF: \(driver)") }
+            if let architecture = architecture, !entry.architectures.contains(architecture) { throw DeploymentError("Selected driver does not declare \(architecture) model support.") }
+        }
+    }
     static func validate(_ config: JSON, root: URL, resources: Bool = true) throws {
-        guard (config["SchemaVersion"] as? Int) == 1, nonzeroUUID(text(config, "DeploymentId")), ["x64", "ARM64"].contains(text(config, "Architecture")),
+        guard [1, 2].contains(config["SchemaVersion"] as? Int ?? 0), nonzeroUUID(text(config, "DeploymentId")), ["x64", "ARM64"].contains(text(config, "Architecture")),
               let printers = config["Printers"] as? [JSON], let cleanup = config["Cleanup"] as? JSON, let names = cleanup["LegacyPrinterNames"] as? [String] else {
-            throw DeploymentError("Not a supported PrintDeployGPO configuration (schema 1).")
+            throw DeploymentError("Not a supported PrintDeployGPO configuration (schema 1 or 2).")
         }
         for key in ["RemoveStaleManaged", "CleanupUserConnections"] {
             guard let value = cleanup[key] as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() else { throw DeploymentError("Cleanup flags must be booleans.") }
         }
-        var seen = Set<String>(); var driverTypes = [String: String]()
+        var seen = Set<String>()
         for printer in printers {
             for key in ["Name", "Kind", "Address", "Location", "Comment", "PackagePath", "InfPath", "DriverName"] {
                 guard printer[key] is String else { throw DeploymentError("Missing printer field: \(key)") }
@@ -144,19 +175,27 @@ final class DeploymentModel {
             guard !name.trimmingCharacters(in: .whitespaces).isEmpty, name.utf16.count <= 200, !matches(name, "[\\x00-\\x1f]"), seen.insert(name.lowercased()).inserted else { throw DeploymentError("Empty, invalid or duplicate printer name: \(name)") }
             if kind == "IPP" { _ = try IppEndpoint.parse(text(printer, "Address")) }
             else if ["Type3", "Type4"].contains(kind) {
-                let host = text(printer, "Address"), driver = text(printer, "DriverName")
-                guard validHost(host), let port = printer["PortNumber"] as? Int, (1...65535).contains(port), !driver.isEmpty else { throw DeploymentError("Invalid TCP host, port or driver for \(name).") }
-                if let previous = driverTypes[driver.lowercased()], previous != kind { throw DeploymentError("A driver cannot be both Type 3 and Type 4: \(driver)") }; driverTypes[driver.lowercased()] = kind
-                let packagePath = text(printer, "PackagePath"), infPath = text(printer, "InfPath")
-                guard matches(packagePath, "(?i)^Drivers[/\\\\]") else { throw DeploymentError("Driver packages must be under Drivers in the deployment folder.") }
-                let package = try resource(root, packagePath), inf = try resource(root, infPath)
-                guard inf.path.hasPrefix(package.path + "/"), inf.pathExtension.lowercased() == "inf" else { throw DeploymentError("INF must be inside its package.") }
-                if resources {
-                    try rejectLinks(in: package)
-                    let models = try INFModels.catalog(inf, type: kind == "Type3" ? 3 : 4).map { $0.name }
-                    guard models.contains(where: { same($0, driver) }) else { throw DeploymentError("Driver name is absent from the selected INF: \(driver)") }
+                guard validHost(text(printer, "Address")), let port = printer["PortNumber"] as? Int, (1...65535).contains(port) else { throw DeploymentError("Invalid TCP host or port for \(name).") }
+                let shared = ["PackagePath", "InfPath", "DriverName"].contains { !text(printer, $0).isEmpty }
+                if shared { try validatePackage(printer, root: root, kind: kind, resources: resources) }
+                var count = 0
+                if let raw = printer["DriverPackages"] {
+                    guard config["SchemaVersion"] as? Int == 2, let variants = raw as? JSON else { throw DeploymentError("Architecture-specific packages require schema 2 and a package object.") }
+                    for (architecture, rawPackage) in variants {
+                        guard ["x64", "ARM64"].contains(architecture), let package = rawPackage as? JSON else { throw DeploymentError("DriverPackages keys must be x64 or ARM64 package objects.") }
+                        try validatePackage(package, root: root, kind: kind, architecture: architecture, resources: resources); count += 1
+                    }
                 }
+                guard shared || count > 0 else { throw DeploymentError("Select at least one driver package for \(name).") }
             } else { throw DeploymentError("Unknown printer type: \(kind)") }
+        }
+        for architecture in ["x64", "ARM64"] {
+            var versions = [String: String]()
+            for printer in printers where text(printer, "Kind") != "IPP" {
+                let resolved = resolvedDriver(printer, architecture: architecture), name = text(resolved, "DriverName").lowercased(), kind = text(resolved, "Kind")
+                if name.isEmpty { continue }
+                if let previous = versions[name], previous != kind { throw DeploymentError("A driver cannot be both Type3 and Type4 on \(architecture): \(name)") }; versions[name] = kind
+            }
         }
         for name in names {
             guard !name.trimmingCharacters(in: .whitespaces).isEmpty, !matches(name, "[\\x00-\\x1f*?\\[\\]]"), !seen.contains(name.lowercased()) else { throw DeploymentError("Legacy cleanup requires exact, unconfigured printer names.") }
@@ -191,6 +230,7 @@ final class DeploymentModel {
         return (relative, relative + "\\" + String(inf.path.dropFirst(source.path.count + 1)).replacingOccurrences(of: "/", with: "\\"), models)
     }
     func save() throws {
+        if printers.contains(where: { $0["DriverPackages"] != nil }) { config["SchemaVersion"] = 2 }
         guard let root = root, let url = configURL else { throw DeploymentError("Open or create a deployment first.") }
         try Self.validate(config, root: root)
         if FileManager.default.fileExists(atPath: url.path) {
@@ -271,6 +311,7 @@ final class DeploymentModel {
         guard let root = root else { throw DeploymentError("Open or create a deployment first.") }
         guard configURL?.lastPathComponent == "printers.json" else { throw DeploymentError("To export a deployment bundle, open or create printers.json in the final deployment folder. Use Save JSON to edit this named configuration copy.") }
         guard matches(windowsRoot, "^\\\\\\\\[^\\\\]+\\\\[^\\\\]+"), !matches(windowsRoot, "[\"\\r\\n]") else { throw DeploymentError("Enter the final Windows UNC folder, such as \\\\fileserver\\Software\\Printers.") }
+        if printers.contains(where: { $0["DriverPackages"] != nil }) { config["SchemaVersion"] = 2 }
         try Self.validate(config, root: root)
         let files = ["PrinterDeployment.ps1", "Launch-Configurator.cmd", "README.md", "Modules/PrinterDeployment.Core.psm1", "Modules/PrinterDeployment.Clients.psm1", "Modules/PrinterDeployment.Deploy.psm1", "Modules/PrinterDeployment.Gui.psm1", "Templates/Install-PrinterDeploymentTask.ps1.template", "Templates/Report-UserPrinters.ps1.template"]
         for file in files { _ = try Self.resource(root, file); guard FileManager.default.fileExists(atPath: source.appendingPathComponent(file).path) else { throw DeploymentError("Application bundle is missing \(file). Rebuild or download the full app.") } }

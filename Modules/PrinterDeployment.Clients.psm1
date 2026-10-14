@@ -70,7 +70,7 @@ function New-PDClientReport {
     $verification = @()
     if ($Identity.Scope -eq 'Machine') {
         $verification = @($Config.Printers | ForEach-Object {
-            $p = $_; $actual = @($After | Where-Object { $_.Name -eq $p.Name })
+            $p = Get-PDPrinterDriverForArchitecture $_ (Get-PDNativeArchitecture); $actual = @($After | Where-Object { $_.Name -eq $p.Name })
             $status = 'Missing'
             if ($p.Name -in $UnsupportedPrinters) { $status = 'Unsupported architecture' }
             elseif ($InventoryError) { $status = 'Unknown' }

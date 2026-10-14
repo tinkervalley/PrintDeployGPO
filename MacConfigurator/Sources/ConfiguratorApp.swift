@@ -58,12 +58,14 @@ final class PrinterEditor: NSObject, NSWindowDelegate {
     let model: DeploymentModel
     let original: JSON
     let originalEndpoint: IppEndpoint?
-    let dialog = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 620), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    let dialog = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 740), styleMask: [.titled, .closable], backing: .buffered, defer: false)
     let name = NSTextField(), host = NSTextField(), path = NSTextField(string: "/ipp"), port = NSTextField(string: "631"), location = NSTextField(), comment = NSTextField()
     let kind = NSPopUpButton(), scheme = NSPopUpButton(), driver = NSPopUpButton()
     let packageLabel = NSTextField(wrappingLabelWithString: "Import the full extracted vendor package.")
     var packagePath = "", infPath = ""
     var catalog = [DriverModel]()
+    var slots = [String: JSON](), currentTarget = "Shared/default", changingSlot = false
+    let packageTarget = NSPopUpButton(), packageKind = NSPopUpButton()
     let support = NSTextField(wrappingLabelWithString: "")
     let customPort = NSButton(checkboxWithTitle: "Custom port", target: nil, action: nil)
     var result: JSON?
@@ -72,6 +74,11 @@ final class PrinterEditor: NSObject, NSWindowDelegate {
     init(model: DeploymentModel, printer: JSON? = nil) {
         self.model = model; original = printer ?? [:]; originalEndpoint = try? IppEndpoint.parse(text(printer ?? [:], "Address")); super.init()
         dialog.title = printer == nil ? "Add printer" : "Edit printer"; dialog.isReleasedWhenClosed = false; dialog.delegate = self
+        slots["Shared/default"] = ["Kind": text(original, "Kind"), "PackagePath": text(original, "PackagePath"), "InfPath": text(original, "InfPath"), "DriverName": text(original, "DriverName")]
+        for (key, value) in original["DriverPackages"] as? JSON ?? [:] { if let value = value as? JSON { slots[key] = value } }
+        packageTarget.addItems(withTitles: ["Shared/default", "x64", "ARM64"]); packageKind.addItems(withTitles: ["Type4", "Type3"])
+        if text(original, "DriverName").isEmpty, let first = ["x64", "ARM64"].first(where: { slots[$0] != nil }) { currentTarget = first; packageTarget.selectItem(withTitle: first) }
+        packageTarget.target = self; packageTarget.action = #selector(packageTargetChanged); packageKind.target = self; packageKind.action = #selector(packageKindChanged)
         kind.addItems(withTitles: ["IPP", "Type4", "Type3"]); scheme.addItems(withTitles: ["ipp", "ipps"])
         func row(_ title: String, _ field: NSView) -> NSView {
             let caption = label(title); caption.widthAnchor.constraint(equalToConstant: 150).isActive = true
@@ -80,7 +87,8 @@ final class PrinterEditor: NSObject, NSWindowDelegate {
         let portField = stack([customPort, port]); port.widthAnchor.constraint(equalToConstant: 100).isActive = true
         protocolRow = row("Protocol", scheme); pathRow = row("Subpath", path)
         let importButton = ActionButton("Import driver package…") { [weak self] in self?.importDriver() }
-        packageRow = row("Driver package", stack([packageLabel, importButton], vertical: true)); driverRow = row("Driver name", stack([driver, support], vertical: true))
+        let clearPackage = ActionButton("Clear this package") { [weak self] in guard let self = self else { return }; self.slots[self.currentTarget] = ["Kind": self.packageKind.titleOfSelectedItem ?? "Type4"]; self.loadSlot() }
+        packageRow = row("Driver package", stack([stack([packageTarget, packageKind]), packageLabel, stack([importButton, clearPackage])], vertical: true)); driverRow = row("Driver name", stack([driver, support], vertical: true))
         let hint = label("Enter only an IP address or hostname. IPP/IPPS use port 631 automatically. For IPPS, use a hostname matching a trusted printer certificate.")
         hint.textColor = .secondaryLabelColor
         let save = ActionButton("Save printer") { [weak self] in self?.save() }; save.keyEquivalent = "\r"
@@ -100,17 +108,40 @@ final class PrinterEditor: NSObject, NSWindowDelegate {
         kind.target = self; kind.action = #selector(kindChanged); scheme.target = self; scheme.action = #selector(protocolChanged); customPort.target = self; customPort.action = #selector(protocolChanged)
         driver.target = self; driver.action = #selector(driverChanged)
         kindChanged()
-        if !infPath.isEmpty, text(original, "Kind") != "IPP", let root = model.root {
-            do { catalog = try INFModels.catalog(DeploymentModel.resource(root, infPath), type: kind.titleOfSelectedItem == "Type3" ? 3 : 4); driver.addItems(withTitles: catalog.map { $0.name }); if let selected = catalog.first(where: { same($0.name, text(original, "DriverName")) }) { driver.selectItem(withTitle: selected.name); packageLabel.stringValue = infPath } else { driver.selectItem(at: -1); packageLabel.stringValue = "Saved driver name is not present in this INF. Select a valid model." }; driverChanged() }
-            catch { packageLabel.stringValue = "Package needs attention: \(error.localizedDescription)" }
-        }
     }
+    func storeSlot() {
+        guard !changingSlot else { return }
+        var value = slots[currentTarget] ?? [:]
+        value.merge(["Kind": packageKind.titleOfSelectedItem ?? kind.titleOfSelectedItem ?? "Type4", "PackagePath": packagePath, "InfPath": infPath, "DriverName": driver.titleOfSelectedItem ?? ""]) { _, new in new }
+        slots[currentTarget] = value
+    }
+    func loadSlot() {
+        changingSlot = true; defer { changingSlot = false }
+        let slot = slots[currentTarget] ?? [:]
+        let type = currentTarget == "Shared/default" ? (kind.titleOfSelectedItem ?? "Type4") : (slot["Kind"] as? String ?? kind.titleOfSelectedItem ?? "Type4")
+        packageKind.selectItem(withTitle: type); packageKind.isEnabled = currentTarget != "Shared/default"
+        packagePath = text(slot, "PackagePath"); infPath = text(slot, "InfPath"); packageLabel.stringValue = infPath.isEmpty ? "No package selected for \(currentTarget)." : infPath
+        driver.removeAllItems(); catalog = []
+        if !infPath.isEmpty, let root = model.root {
+            do {
+                catalog = try INFModels.catalog(DeploymentModel.resource(root, infPath), type: type == "Type3" ? 3 : 4).filter { currentTarget == "Shared/default" || $0.architectures.contains(currentTarget) }
+                driver.addItems(withTitles: catalog.map { $0.name })
+                if let selected = catalog.first(where: { same($0.name, text(slot, "DriverName")) }) { driver.selectItem(withTitle: selected.name) }
+                else { driver.selectItem(at: -1); packageLabel.stringValue = "Select a model compatible with \(currentTarget)." }
+            } catch { packageLabel.stringValue = "Package needs attention: \(error.localizedDescription)" }
+        }
+        driverChanged()
+    }
+    @objc func packageTargetChanged() { guard !changingSlot else { return }; storeSlot(); currentTarget = packageTarget.titleOfSelectedItem ?? "Shared/default"; loadSlot() }
+    @objc func packageKindChanged() { guard !changingSlot else { return }; slots[currentTarget] = ["Kind": packageKind.titleOfSelectedItem ?? "Type4"]; loadSlot() }
     @objc func kindChanged() {
+        if !lastKind.isEmpty && lastKind != "IPP" { storeSlot() }
         if lastKind == "IPP" { ippPort = port.stringValue } else if !lastKind.isEmpty { tcpPort = port.stringValue }
         let current = kind.titleOfSelectedItem ?? "IPP", ipp = current == "IPP"
-        if !lastKind.isEmpty && lastKind != "IPP" && current != "IPP" && lastKind != current { packagePath = ""; infPath = ""; driver.removeAllItems(); catalog = []; support.stringValue = ""; packageLabel.stringValue = "Import a package for \(current)." }
+        if !lastKind.isEmpty && lastKind != "IPP" && current != "IPP" && lastKind != current { slots.removeValue(forKey: "Shared/default") }
         protocolRow.isHidden = !ipp; pathRow.isHidden = !ipp; packageRow.isHidden = ipp; driverRow.isHidden = ipp; customPort.isHidden = !ipp
         port.stringValue = ipp ? ippPort : tcpPort; port.isEnabled = !ipp || customPort.state == .on; lastKind = current
+        if !ipp { loadSlot() }
     }
     @objc func protocolChanged() {
         if kind.titleOfSelectedItem == "IPP" { port.isEnabled = customPort.state == .on; if !port.isEnabled { port.stringValue = String(IppEndpoint.defaultPort(scheme.titleOfSelectedItem ?? "ipp")) } }
@@ -125,10 +156,12 @@ final class PrinterEditor: NSObject, NSWindowDelegate {
         guard folder.runModal() == .OK, let source = folder.url else { return }
         let picker = NSOpenPanel(); picker.directoryURL = source; picker.allowedContentTypes = [UTType(filenameExtension: "inf") ?? .data]; picker.message = "Select the printer INF inside this package."
         guard picker.runModal() == .OK, let inf = picker.url else { return }
-        do { let imported = try model.importPackage(source, inf: inf, type: kind.titleOfSelectedItem == "Type3" ? 3 : 4); packagePath = imported.0; infPath = imported.1; packageLabel.stringValue = infPath; driver.removeAllItems(); driver.addItems(withTitles: imported.2); catalog = try INFModels.catalog(inf, type: kind.titleOfSelectedItem == "Type3" ? 3 : 4); driverChanged() } catch { errorAlert(error) }
+        do { let type = packageKind.titleOfSelectedItem == "Type3" ? 3 : 4; let detected = try INFModels.catalog(inf, type: type).filter { currentTarget == "Shared/default" || $0.architectures.contains(currentTarget) }; guard !detected.isEmpty else { throw DeploymentError("This INF has no \(currentTarget) models.") }; let imported = try model.importPackage(source, inf: inf, type: type); packagePath = imported.0; infPath = imported.1; packageLabel.stringValue = infPath; driver.removeAllItems(); catalog = detected; driver.addItems(withTitles: detected.map { $0.name }); driverChanged(); storeSlot() } catch { errorAlert(error) }
     }
     func makePrinter() throws -> JSON {
+        storeSlot()
         var printer = original
+        let shared = slots["Shared/default"] ?? [:]
         let kind = self.kind.titleOfSelectedItem ?? "IPP"
         let trim: (String) -> String = { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         var address = trim(host.stringValue)
@@ -137,9 +170,12 @@ final class PrinterEditor: NSObject, NSWindowDelegate {
             let endpoint = IppEndpoint(host: address, scheme: scheme.titleOfSelectedItem ?? "ipp", path: path.stringValue, port: portNumber)
             address = endpoint == originalEndpoint ? text(original, "Address") : try endpoint.address()
         }
-        printer.merge(["Name": trim(name.stringValue), "Kind": kind, "Address": address, "PortNumber": portNumber, "Location": trim(location.stringValue), "Comment": trim(comment.stringValue), "PackagePath": packagePath, "InfPath": infPath, "DriverName": driver.titleOfSelectedItem ?? ""]) { _, new in new }
+        printer.merge(["Name": trim(name.stringValue), "Kind": kind, "Address": address, "PortNumber": portNumber, "Location": trim(location.stringValue), "Comment": trim(comment.stringValue), "PackagePath": text(shared, "PackagePath"), "InfPath": text(shared, "InfPath"), "DriverName": text(shared, "DriverName")]) { _, new in new }
         guard let root = model.root else { throw DeploymentError("Open a deployment first.") }
-        var validation = DeploymentModel.freshConfig(); validation["Architecture"] = model.config["Architecture"]; validation["Printers"] = [printer]
+        var variants: JSON = [:]
+        if kind != "IPP" { for architecture in ["x64", "ARM64"] { if let slot = slots[architecture], ["PackagePath", "InfPath", "DriverName"].contains(where: { !text(slot, $0).isEmpty }) { variants[architecture] = slot } } }
+        if variants.isEmpty { printer.removeValue(forKey: "DriverPackages") } else { printer["DriverPackages"] = variants }
+        var validation = DeploymentModel.freshConfig(); if !variants.isEmpty { validation["SchemaVersion"] = 2 }; validation["Architecture"] = model.config["Architecture"]; validation["Printers"] = [printer]
         try DeploymentModel.validate(validation, root: root); return printer
     }
     func save() { do { result = try makePrinter(); NSApp.stopModal(withCode: .OK); dialog.orderOut(nil) } catch { errorAlert(error) } }
@@ -256,7 +292,7 @@ final class ConfiguratorController: NSObject, NSWindowDelegate, NSTextFieldDeleg
     @objc func legacyChanged() { settingsChanged() }
     func controlTextDidChange(_ obj: Notification) { updateStatus("Windows UNC path is used for bundle exports and stored locally on this Mac.") }
     func updateStatus(_ message: String) { status.stringValue = message; window.isDocumentEdited = model.dirty; window.representedURL = model.configURL }
-    func refreshPrinters() { printerTable.replace(model.printers.map { ["Name": text($0, "Name"), "Kind": text($0, "Kind"), "Address": text($0, "Address"), "Driver": text($0, "Kind") == "IPP" ? "Microsoft IPP Class Driver" : text($0, "DriverName"), "Location": text($0, "Location")] }) }
+    func refreshPrinters() { printerTable.replace(model.printers.map { ["Name": text($0, "Name"), "Kind": text($0, "Kind"), "Address": text($0, "Address"), "Driver": DeploymentModel.driverSummary($0), "Location": text($0, "Location")] }) }
     func editPrinter(new: Bool) {
         guard model.root != nil else { errorAlert(DeploymentError("Open or create a deployment first.")); return }
         let row = printerTable.table.selectedRow; if !new && !model.printers.indices.contains(row) { return }

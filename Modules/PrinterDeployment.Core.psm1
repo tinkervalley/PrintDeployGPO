@@ -200,9 +200,55 @@ function Get-PDInfDriverCatalog {
     @($catalog.Values | Sort-Object Name)
 }
 
+function Get-PDPrinterDriverForArchitecture {
+    param($Printer, [ValidateSet('x64','ARM64')][string]$Architecture)
+    if ($Printer.Kind -eq 'IPP' -or -not $Printer.PSObject.Properties['DriverPackages'] -or
+        -not $Printer.DriverPackages.PSObject.Properties[$Architecture]) { return $Printer }
+    $package=$Printer.DriverPackages.PSObject.Properties[$Architecture].Value
+    $copy=[ordered]@{}
+    foreach ($property in $Printer.PSObject.Properties) { $copy[$property.Name]=$property.Value }
+    foreach ($field in @('PackagePath','InfPath','DriverName')) { $copy[$field]=$package.$field }
+    if ($package.PSObject.Properties['Kind']) { $copy.Kind=$package.Kind }
+    [pscustomobject]$copy
+}
+
+function Get-PDPrinterDriverSummary {
+    param($Printer)
+    if ($Printer.Kind -eq 'IPP') { return 'Microsoft IPP Class Driver' }
+    $parts=@()
+    if ($Printer.DriverName) { $parts += 'Shared: ' + $Printer.DriverName }
+    if ($Printer.PSObject.Properties['DriverPackages']) {
+        foreach ($architecture in @('x64','ARM64')) {
+            if ($Printer.DriverPackages.PSObject.Properties[$architecture]) {
+                $parts += $architecture + ': ' + $Printer.DriverPackages.PSObject.Properties[$architecture].Value.DriverName
+            }
+        }
+    }
+    $parts -join '; '
+}
+
+function Assert-PDDriverPackage {
+    param($Package, [string]$Root, [string]$Kind, [string]$Architecture = '')
+    if ($Package.PSObject.Properties['Kind']) { $Kind=$Package.Kind }
+    if ($Kind -notin @('Type3','Type4')) { throw 'Driver package kind must be Type3 or Type4.' }
+    foreach ($field in @('PackagePath','InfPath','DriverName')) {
+        if ($Package.$field -isnot [string] -or [string]::IsNullOrWhiteSpace($Package.$field)) { throw "Missing driver package field: $field" }
+    }
+    if ($Package.PackagePath -notmatch '^Drivers[\\/]') { throw 'Driver packages must be under Drivers in the deployment folder.' }
+    $packagePath=Resolve-PDResource $Root $Package.PackagePath
+    $inf=Resolve-PDResource $Root $Package.InfPath
+    if (-not (Test-Path -LiteralPath $packagePath -PathType Container) -or -not (Test-Path -LiteralPath $inf -PathType Leaf)) { throw 'Missing package or INF.' }
+    if (-not $inf.StartsWith($packagePath.TrimEnd('\','/') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetExtension($inf) -ne '.inf') { throw 'INF must be inside its driver package.' }
+    if (@(Get-ChildItem -LiteralPath $packagePath -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) { throw 'Driver packages must not contain links or junctions.' }
+    $catalog=@(Get-PDInfDriverCatalog $inf -DriverType ([int]$Kind.Substring(4)))
+    $entry=@($catalog | Where-Object { $_.Name -eq $Package.DriverName })
+    if (-not $entry.Count) { throw "Driver name is not in the selected INF: $($Package.DriverName)" }
+    if ($Architecture -and $Architecture -notin $entry[0].Architectures) { throw "Selected driver does not declare $Architecture model support." }
+}
+
 function Assert-PDConfiguration {
     param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)][string]$Root)
-    if ($Config.SchemaVersion -ne 1) { throw 'Unsupported configuration schema.' }
+    if ($Config.SchemaVersion -notin @(1,2)) { throw 'Unsupported configuration schema.' }
     $id = [guid]::Empty
     if (-not [guid]::TryParse([string]$Config.DeploymentId, [ref]$id) -or $id -eq [guid]::Empty) { throw 'DeploymentId must be a non-empty GUID.' }
     if ($Config.Architecture -notin @('x64', 'ARM64')) { throw 'Architecture must be x64 or ARM64.' }
@@ -225,19 +271,26 @@ function Assert-PDConfiguration {
             if ([string]::IsNullOrWhiteSpace($p.Address) -or [uri]::CheckHostName($p.Address) -eq [UriHostNameType]::Unknown) { throw "Invalid TCP/IP host for $($p.Name)." }
             $port = 0
             if (-not [int]::TryParse([string]$p.PortNumber, [ref]$port) -or $port -lt 1 -or $port -gt 65535) { throw 'RAW TCP port must be 1-65535.' }
-            if ([string]::IsNullOrWhiteSpace($p.DriverName)) { throw "Missing driver name for $($p.Name)." }
-            if ($p.PackagePath -notmatch '^Drivers[\\/]') { throw 'Driver packages must be under Drivers in the deployment folder.' }
-            $package = Resolve-PDResource $Root $p.PackagePath
-            $inf = Resolve-PDResource $Root $p.InfPath
-            if (-not (Test-Path -LiteralPath $package -PathType Container) -or -not (Test-Path -LiteralPath $inf -PathType Leaf)) { throw "Missing package or INF for $($p.Name)." }
-            if (-not $inf.StartsWith($package.TrimEnd('\','/') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetExtension($inf) -ne '.inf') { throw 'INF must be inside its driver package.' }
-            if (@(Get-ChildItem -LiteralPath $package -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) { throw 'Driver packages must not contain links or junctions.' }
-            $models = @(Get-PDInfDriverCatalog $inf -DriverType ([int]$p.Kind.Substring(4)) | ForEach-Object { $_.Name })
-            if ($p.DriverName -notin $models) { throw "Driver name is not in the selected INF: $($p.DriverName)" }
+            $hasShared = $p.DriverName -or $p.PackagePath -or $p.InfPath
+            if ($hasShared) { Assert-PDDriverPackage $p $Root $p.Kind }
+            $variantCount=0
+            if ($p.PSObject.Properties['DriverPackages']) {
+                if ($Config.SchemaVersion -ne 2) { throw 'Architecture-specific DriverPackages require configuration schema 2. Update the deployment bundle.' }
+                if ($p.DriverPackages -isnot [pscustomobject]) { throw 'DriverPackages must be an object keyed by x64 and ARM64.' }
+                foreach ($property in $p.DriverPackages.PSObject.Properties) {
+                    if ($property.Name -cnotin @('x64','ARM64') -or $property.Value -isnot [pscustomobject]) { throw 'DriverPackages keys must be x64 or ARM64 package objects.' }
+                    Assert-PDDriverPackage $property.Value $Root $p.Kind $property.Name
+                    $variantCount++
+                }
+            }
+            if (-not $hasShared -and -not $variantCount) { throw "Missing driver name for $($p.Name)." }
         } else { throw "Unknown printer kind: $($p.Kind)" }
     }
-    foreach ($group in @($Config.Printers | Where-Object { $_.Kind -in @('Type3','Type4') } | Group-Object DriverName)) {
-        if (@($group.Group.Kind | Select-Object -Unique).Count -gt 1) { throw "A driver name cannot be both Type 3 and Type 4: $($group.Name)" }
+    foreach ($architecture in @('x64','ARM64')) {
+        $drivers=@($Config.Printers | Where-Object { $_.Kind -in @('Type3','Type4') } | ForEach-Object { Get-PDPrinterDriverForArchitecture $_ $architecture } | Where-Object { $_.DriverName })
+        foreach ($group in @($drivers | Group-Object DriverName)) {
+            if (@($group.Group.Kind | Select-Object -Unique).Count -gt 1) { throw "A driver name cannot be both Type 3 and Type 4 on ${architecture}: $($group.Name)" }
+        }
     }
     foreach ($name in @($Config.Cleanup.LegacyPrinterNames)) {
         if ($name -isnot [string] -or [string]::IsNullOrWhiteSpace($name) -or $name -match '[\x00-\x1f*?\[\]]') { throw 'Legacy cleanup requires exact printer names, without wildcard characters.' }
@@ -272,6 +325,8 @@ function Get-PDNativeArchitecture {
 function Test-PDPrinterArchitecture {
     param($Printer, [string]$Root, [ValidateSet('x64','ARM64')][string]$Architecture)
     if ($Printer.Kind -eq 'IPP') { return $true }
+    $Printer=Get-PDPrinterDriverForArchitecture $Printer $Architecture
+    if (-not $Printer.DriverName) { return $false }
     try {
         $models = @(Get-PDInfModels (Resolve-PDResource $Root $Printer.InfPath) $Architecture -DriverType ([int]$Printer.Kind.Substring(4)))
         return $Printer.DriverName -in $models

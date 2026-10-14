@@ -11,9 +11,9 @@ A printer deployment tool with native Windows and Mac configuration GUIs and a W
    ```
 
 2. Choose a deployment folder, ideally a dedicated UNC path such as `\\fileserver\Software\Printers`. A local folder is allowed for staging. Use a UNC path when creating the GPO; mapped drives are unavailable to SYSTEM.
-3. Architecture is detected per selected driver. Importing an INF lists the union of x64 and ARM64 model names, and the editor shows the architectures declared for the selected name. One deployment folder can serve x64 and ARM64 clients: IPP printers are architecture-independent. At deployment, each packaged INF is checked for the exact selected driver name in the client's native architecture. Incompatible selections are skipped and reported as **Unsupported architecture**; they do not block compatible queues or cause stale cleanup of those configured printers. Type 3 and Type 4 drivers both require native-compatible packages; driverless IPP is the shared path. Use a separate deployment only if that same printer needs different packages/model names on each architecture. Run 64-bit PowerShell on clients.
+3. Architecture is detected per selected driver. Importing an INF lists the union of x64 and ARM64 model names, and the editor shows the architectures declared for the selected name. One deployment folder can serve x64 and ARM64 clients: IPP printers are architecture-independent. At deployment, each packaged INF is checked for the exact selected driver name in the client's native architecture. Incompatible selections are skipped and reported as **Unsupported architecture**; they do not block compatible queues or cause stale cleanup of those configured printers. Type 3 and Type 4 drivers both require native-compatible packages; driverless IPP is the shared path. A single printer can select separate packages and model names for each architecture, as described below. Run 64-bit PowerShell on clients.
 4. Add an **IPP** printer by entering only its IP address or hostname, choosing **ipp** or **ipps**, and entering its subpath (default `/ipp`). The GUI builds the full URL and uses port **631** automatically for either protocol. Enable **Use custom port** for a printer advertising a different port, such as IPPS on 443. A leading slash is added to the subpath if omitted. IPv6 addresses work with or without brackets. Existing saved URLs, including custom ports and HTTP(S) schemes, are preserved when editing without endpoint changes. IPPS requires a trusted certificate matching the hostname. The correct resource path is printer-specific.
-5. For a **Type3** or **Type4** printer, enter its IP address/hostname and RAW TCP port (usually 9100). Choose **Import driver package**, select the complete extracted vendor package folder, then an INF inside that folder. The tool copies the entire folder into `Drivers\<unique-id>`, preserving manifests, catalogs, binaries and subfolders. Choose the exact detected driver name from the dropdown. EXE/MSI/ZIP packages must be extracted first.
+5. For a **Type3** or **Type4** printer, enter its IP address/hostname and RAW TCP port (usually 9100). Choose **Import driver package**, select the complete extracted vendor package folder, then an INF inside that folder. The tool copies the entire folder into `Drivers\<unique-id>`, preserving manifests, catalogs, binaries and subfolders. Choose the exact detected driver name from the dropdown. EXE/MSI/ZIP packages must be extracted first. To use different packages on different clients, select **x64** in the driver package target, choose its **Type3** or **Type4** package type and import/select its driver; repeat for **ARM64** on the same printer. Each target retains its own package, INF, model name and type. **Shared/default** is optional and acts as the fallback where there is no architecture override. You can also use just the two overrides with no shared package.
 6. Configure cleanup if needed, validate, then **Save deployment bundle**. This exports `Install-PrinterDeploymentTask.ps1` for Computer Startup (one SYSTEM task) and `Report-UserPrinters.ps1` for User Logon (no additional task). Both accept blank GPO parameters. Deploy the user logon script to collect old shared-printer connections and apply selected user removals. The GPO deployment tab explains how to install it. Save writes the configuration last, after copying the scripts and resources.
 
 Configuration does not install printers on the administrator workstation. The GUI requires write access to the deployment folder but does not itself require elevation. Changing folders copies configured packages and keeps the original bundle. Opening an existing `printers.json` preserves its deployment identity. Preserve that identity across updates so local ownership records continue to work.
@@ -51,7 +51,35 @@ Printers\
 
 Package paths in JSON are relative to this folder. Validation rejects absolute resource paths, traversal, missing packages, symbolic links/junctions, unsupported drivers, duplicate queue names and cleanup names that conflict with configured printers. Cancelled imports may leave unreferenced package folders; these are not deployed. The tool does not delete unused packages automatically.
 
-The INF reader supports neutral/en-US string tables, quoted names, comments, continuations and manufacturer model sections for x64 and ARM64, including OS-decorated sections. Both GUIs show the selected model's architecture declarations. This describes INF model support, not proof that a package's binaries, OS version constraints or signatures will work on a particular client. The legacy JSON Architecture field is retained for compatibility but no longer filters driver names or limits deployment. The dropdown is a list of candidate model names; Windows still decides whether a model's OS decoration applies on a particular client. Localized-only or unusually structured vendor INFs may need a different vendor package. All packaged INFs must declare `Class=Printer`. Type 4 requires `ClassVer=4.0`; Type 3 accepts an absent `ClassVer` or `ClassVer=3.0` and rejects Type 4 packages. Select the corresponding type explicitly before importing. Changing between Type 3 and Type 4 clears the package selection so the wrong package cannot be reused. Vendor EXE/MSI installers and co-installer workflows are not executed. Windows independently enforces package signatures and compatibility during installation.
+The INF reader supports neutral/en-US string tables, quoted names, comments, continuations and manufacturer model sections for x64 and ARM64, including OS-decorated sections. Both GUIs show the selected model's architecture declarations. This describes INF model support, not proof that a package's binaries, OS version constraints or signatures will work on a particular client. The legacy JSON Architecture field is retained for compatibility but no longer filters driver names or limits deployment. The dropdown is a list of candidate model names; Windows still decides whether a model's OS decoration applies on a particular client. Localized-only or unusually structured vendor INFs may need a different vendor package. All packaged INFs must declare `Class=Printer`. Type 4 requires `ClassVer=4.0`; Type 3 accepts an absent `ClassVer` or `ClassVer=3.0` and rejects Type 4 packages. Select the corresponding type explicitly before importing. Changing a package target between Type 3 and Type 4 clears that target's package selection. Changing the printer connection type clears the shared package on a direct Type3/Type4 change; explicit architecture overrides retain their own types. Vendor EXE/MSI installers and co-installer workflows are not executed. Windows independently enforces package signatures and compatibility during installation.
+
+## Separate packages on one printer
+
+Use one queue name and TCP/IP endpoint, then configure **x64** and **ARM64** targets in the printer editor. An explicit native override takes precedence over **Shared/default**. Each override may choose a different driver name and driver type, including Type3 on x64 and Type4 on ARM64. The client stages/registers only the resolved native driver; IPP still needs no packages. If there is no native override or compatible shared package, the queue is reported as **Unsupported architecture**.
+
+Both GUIs automatically save these configurations with `SchemaVersion: 2` and a `DriverPackages` object keyed by `x64` and/or `ARM64`. Existing configurations without overrides remain compatible with schema 1. Update the deployment engine before rolling out architecture overrides: use **Save deployment bundle** with the updated configurator. **Save JSON** alone does not update the PowerShell engine. Older engines/configurators reject schema 2 to prevent silently discarding or ignoring architecture selections. The deployment folder, queue entry, scheduled task and existing GPO scripts can stay the same.
+
+For example, one Type4 queue can contain the following driver settings (the complete extracted packages must exist under those paths):
+
+```json
+"PackagePath": "",
+"InfPath": "",
+"DriverName": "",
+"DriverPackages": {
+  "x64": {
+    "Kind": "Type3",
+    "PackagePath": "Drivers\\vendor-x64",
+    "InfPath": "Drivers\\vendor-x64\\printer.inf",
+    "DriverName": "Vendor Legacy Driver"
+  },
+  "ARM64": {
+    "Kind": "Type4",
+    "PackagePath": "Drivers\\vendor-arm64",
+    "InfPath": "Drivers\\vendor-arm64\\printer.inf",
+    "DriverName": "Vendor ARM64 Driver"
+  }
+}
+```
 
 ## Mac configurator
 

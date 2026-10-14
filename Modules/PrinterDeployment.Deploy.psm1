@@ -198,7 +198,7 @@ function Invoke-PDDeployment {
         $root = Split-Path -Parent $ConfigPath
         $nativeArch = Get-PDNativeArchitecture
         foreach ($p in @($config.Printers)) {
-            if (Test-PDPrinterArchitecture $p $root $nativeArch) { $applicablePrinters += @($p) }
+            if (Test-PDPrinterArchitecture $p $root $nativeArch) { $applicablePrinters += @(Get-PDPrinterDriverForArchitecture $p $nativeArch) }
             else { $unsupportedPrinters += @($p.Name) }
         }
         if (-not $dryRun) {

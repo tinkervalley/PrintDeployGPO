@@ -159,6 +159,26 @@ Model="Test Printer v4"
         $config.Printers=@($printer); Assert-PDConfiguration $config $tempRoot
         $printer.Kind='Type4'; Assert-Throws { Assert-PDConfiguration $config $tempRoot } 'Only Type 4'
     }
+    Test-Case 'Architecture overrides validate packages, types and schema without duplicating queue identity' {
+        $config=New-PDConfiguration; $printer=New-TestPrinter 'Both architectures' 'Type4'; $printer.Address='192.0.2.60'
+        $x64=[pscustomobject]@{ Kind='Type3'; PackagePath='Drivers\vendor'; InfPath='Drivers\vendor\type3-valid.inf'; DriverName='Test Printer v4' }
+        $arm=[pscustomobject]@{ Kind='Type4'; PackagePath='Drivers\vendor'; InfPath='Drivers\vendor\printer.inf'; DriverName='ARM printer' }
+        $printer | Add-Member -NotePropertyName DriverPackages -NotePropertyValue ([pscustomobject]@{ x64=$x64; ARM64=$arm }); $config.Printers=@($printer)
+        Assert-Throws { Assert-PDConfiguration $config $tempRoot } 'schema 2'
+        $config.SchemaVersion=2; Assert-PDConfiguration $config $tempRoot
+        $resolved=Get-PDPrinterDriverForArchitecture $printer x64
+        Assert-True ($resolved.Kind -eq 'Type3' -and $resolved.Name -eq $printer.Name -and $resolved.Address -eq $printer.Address -and $printer.Kind -eq 'Type4' -and $printer.DriverName -eq '') 'Native override changed the original queue definition.'
+        Assert-True ((Test-PDPrinterArchitecture $printer $tempRoot x64) -and (Test-PDPrinterArchitecture $printer $tempRoot ARM64)) 'Separate native packages were not applicable.'
+        $arm.DriverName='Test Printer v4'; Assert-Throws { Assert-PDConfiguration $config $tempRoot } 'ARM64 model support'; $arm.DriverName='ARM printer'
+        $arm.InfPath='Drivers\..\escape.inf'; Assert-Throws { Assert-PDConfiguration $config $tempRoot } 'inside|escapes'; $arm.InfPath='Drivers\vendor\printer.inf'
+        $printer.DriverPackages | Add-Member -NotePropertyName x86 -NotePropertyValue $x64; Assert-Throws { Assert-PDConfiguration $config $tempRoot } 'keys must'; $printer.DriverPackages.PSObject.Properties.Remove('x86')
+        $printer.DriverPackages.PSObject.Properties.Remove('ARM64')
+        Assert-True (-not (Test-PDPrinterArchitecture $printer $tempRoot ARM64)) 'An absent native package should be unsupported.'
+        $printer.PackagePath=$arm.PackagePath; $printer.InfPath=$arm.InfPath; $printer.DriverName=$arm.DriverName
+        Assert-PDConfiguration $config $tempRoot
+        Assert-True ((Get-PDPrinterDriverForArchitecture $printer ARM64).DriverName -eq 'ARM printer' -and (Get-PDPrinterDriverForArchitecture $printer x64).Kind -eq 'Type3') 'Shared fallback or override precedence failed.'
+        Write-PDJson $config (Join-Path $tempRoot 'variants.json'); Assert-PDConfiguration (Read-PDConfiguration (Join-Path $tempRoot 'variants.json')) $tempRoot
+    }
     Test-Case 'Invalid URL, duplicate names, flags, names and wildcards rejected' {
         $c = New-PDConfiguration; $p = New-TestPrinter; $c.Printers = @($p)
         $p.Address = 'printer.example.com'; Assert-Throws { Assert-PDConfiguration $c $tempRoot } 'full IPP URL'
@@ -522,6 +542,31 @@ Model="Test Printer v4"
         Invoke-PDDeployment $deploymentFile -RetryCount 1; Invoke-PDDeployment $deploymentFile -RetryCount 1
         Assert-True (@($global:PDMock.Printers | Where-Object { $_.Name -eq $printer.Name }).Count -eq 1) 'Type 3 queue duplicated.'
         Assert-True ('Driver:Legacy Type 3' -in $global:PDMock.Events) 'Type 3 driver registration skipped.'
+    }
+    Test-Case 'One queue deploys distinct x64 Type3 and ARM64 Type4 packages and reports the resolved driver' {
+        $config=New-PDConfiguration; $config.SchemaVersion=2
+        $printer=New-TestPrinter 'One native queue' 'Type4'; $printer.Address='192.0.2.60'
+        $printer | Add-Member -NotePropertyName DriverPackages -NotePropertyValue ([pscustomobject]@{
+            x64=[pscustomobject]@{ Kind='Type3'; PackagePath='Drivers\vendor'; InfPath='Drivers\vendor\type3-deploy.inf'; DriverName='Legacy Type 3' }
+            ARM64=[pscustomobject]@{ Kind='Type4'; PackagePath='Drivers\vendor'; InfPath='Drivers\vendor\printer.inf'; DriverName='ARM printer' }
+        }); $config.Printers=@($printer); Write-PDJson $config $deploymentFile
+        $originalArch=$env:PROCESSOR_ARCHITECTURE; $originalWow=$env:PROCESSOR_ARCHITEW6432
+        try {
+            $env:PROCESSOR_ARCHITEW6432=''
+            foreach ($architecture in @('AMD64','ARM64')) {
+                $env:PROCESSOR_ARCHITECTURE=$architecture; $before=$global:PDMock.Events.Count
+                $expected=if ($architecture -eq 'ARM64') { 'ARM printer' } else { 'Legacy Type 3' }
+                Invoke-PDDeployment $deploymentFile -RetryCount 1; Invoke-PDDeployment $deploymentFile -RetryCount 1
+                $queue=@($global:PDMock.Printers | Where-Object { $_.Name -eq $printer.Name })
+                Assert-True ($queue.Count -eq 1 -and $queue[0].DriverName -eq $expected) 'Native driver selection duplicated the queue or used the wrong driver.'
+                $events=@($global:PDMock.Events | Select-Object -Skip $before | Where-Object { $_ -like 'Driver:*' })
+                Assert-True ($events.Count -gt 0 -and @($events | Where-Object { $_ -ne ('Driver:' + $expected) }).Count -eq 0) 'A non-native driver was staged.'
+                $report=@(Get-PDClientReports $tempRoot $config.DeploymentId)[0]
+                Assert-True ($report.Result -eq 'Success' -and $report.ConfiguredPrinters[0].Status -eq 'Installed') 'Report compared the installed queue with the wrong architecture driver.'
+            }
+            Assert-True (@($global:PDMock.Ports | Where-Object { $_.Name -eq (Get-PDPortName $printer) }).Count -eq 1) 'Architecture selection created duplicate TCP/IP ports.'
+            Assert-True ($printer.DriverName -eq '' -and $printer.Kind -eq 'Type4') 'Deployment mutated the configuration.'
+        } finally { $env:PROCESSOR_ARCHITECTURE=$originalArch; $env:PROCESSOR_ARCHITEW6432=$originalWow }
     }
     Test-Case 'One mixed configuration installs IPP on ARM64 and skips incompatible legacy drivers without stale cleanup' {
         $config=New-PDConfiguration; $config.Cleanup.RemoveStaleManaged=$true

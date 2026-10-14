@@ -6,7 +6,7 @@ func expectError(_ body: () throws -> Void) throws { do { try body() } catch { r
 
 @main struct ModelTests {
     static func main() {
-        do { try run(); print("All 13 Mac model checks passed.") } catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+        do { try run(); print("All 15 Mac model checks passed.") } catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
     }
     static func run() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("pd-mac-tests-" + UUID().uuidString)
@@ -65,6 +65,26 @@ func expectError(_ body: () throws -> Void) throws { do { try body() } catch { r
         let imported = try deployment.importPackage(vendor, inf: inf, type: 4)
         printer.merge(["Name": "Type4", "Kind": "Type4", "Address": "192.0.2.56", "PackagePath": imported.0, "InfPath": imported.1, "DriverName": "Neutral driver"]) { _, new in new }; deployment.printers = [printer]; try deployment.save()
         try expect(FileManager.default.fileExists(atPath: try DeploymentModel.resource(staging, imported.0 + "\\legacy.inf").path), "Full package was not copied."); print("PASS driver import preserves full package and validates selection")
+        let x64: JSON = ["Kind": "Type3", "PackagePath": imported.0, "InfPath": imported.0 + "\\legacy.inf", "DriverName": "Neutral driver", "FuturePackageField": "Keep"]
+        let arm: JSON = ["Kind": "Type4", "PackagePath": imported.0, "InfPath": imported.1, "DriverName": "ARM model"]
+        var variant = printer; variant.merge(["PackagePath": "", "InfPath": "", "DriverName": "", "DriverPackages": ["x64": x64, "ARM64": arm]]) { _, new in new }
+        var variantConfig = deployment.config; variantConfig["Printers"] = [variant]
+        try expectError { try DeploymentModel.validate(variantConfig, root: staging) }
+        variantConfig["SchemaVersion"] = 2; try DeploymentModel.validate(variantConfig, root: staging)
+        let native = DeploymentModel.resolvedDriver(variant, architecture: "x64")
+        try expect(text(native, "Kind") == "Type3" && text(native, "DriverName") == "Neutral driver" && text(native, "Name") == text(variant, "Name") && text(variant, "DriverName").isEmpty, "Native override or nonmutating identity failed.")
+        var bad = arm; bad["DriverName"] = "Neutral driver"; var badPrinter = variant; badPrinter["DriverPackages"] = ["ARM64": bad]; variantConfig["Printers"] = [badPrinter]
+        try expectError { try DeploymentModel.validate(variantConfig, root: staging) }
+        bad["InfPath"] = "Drivers/../escape.inf"; badPrinter["DriverPackages"] = ["ARM64": bad]; variantConfig["Printers"] = [badPrinter]
+        try expectError { try DeploymentModel.validate(variantConfig, root: staging) }
+        var fallback = printer; fallback["DriverPackages"] = ["ARM64": arm]
+        try expect(text(DeploymentModel.resolvedDriver(fallback, architecture: "x64"), "DriverName") == "Neutral driver" && text(DeploymentModel.resolvedDriver(fallback, architecture: "ARM64"), "DriverName") == "ARM model", "Shared fallback or override precedence failed.")
+        print("PASS separate architecture packages validate schema, native type/model and fallback")
+        deployment.printers = [variant]; try DeploymentModel.validate(deployment.config, root: staging); try deployment.save()
+        let variantsReloaded = DeploymentModel(); try variantsReloaded.open(staging.appendingPathComponent("printers.json")); try variantsReloaded.save()
+        let savedX64 = ((variantsReloaded.printers[0]["DriverPackages"] as? JSON)?["x64"] as? JSON) ?? [:]
+        try expect(variantsReloaded.config["SchemaVersion"] as? Int == 2 && text(savedX64, "FuturePackageField") == "Keep" && text(savedX64, "Kind") == "Type3", "Schema upgrade or architecture package round-trip failed.")
+        print("PASS saving upgrades architecture packages to schema 2 and preserves package fields")
         let shared: JSON = ["Name": "\\\\domain\\printer", "Type": "Connection", "DriverName": "Legacy", "PortName": "UNC", "Location": ""]
         let local: JSON = ["Name": "PDF", "Type": "Local", "DriverName": "PDF", "PortName": "PORTPROMPT:", "Location": ""]
         func report(_ scope: String, sid: String = "", user: String = "SYSTEM") -> JSON { ["SchemaVersion": 1, "DeploymentId": text(deployment.config, "DeploymentId"), "ComputerName": "PC001", "Scope": scope, "UserSid": sid, "UserName": user, "Result": "Success", "ReportedAt": "2026-10-13T21:00:00.1234567Z", "StartedAt": "2026-10-13T20:59:00Z", "ErrorMessage": "", "InventoryError": "", "ConfigurationHash": String(repeating: "0", count: 64), "Printers": scope == "Machine" ? [local] : [local, shared], "ConfiguredPrinters": [JSON](), "RemovalResults": [JSON]()] }

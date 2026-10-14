@@ -147,7 +147,7 @@ Vendor=Models,NTamd64,NTarm64
     $grids = @(Get-GuiChildren $loaded[0] | Where-Object { $_ -is [System.Windows.Forms.DataGridView] })
     Assert-Gui (@($grids | Where-Object { $_.Columns.Contains('Address') -and $_.Rows.Count -eq 1 }).Count -eq 1) 'Saved printer did not populate the main GUI.'
     Write-Host 'PASS Existing configuration populates the printer grid.'
-    Write-Host 'All 8 Windows PowerShell GUI smoke checks passed.'
+    Write-Host 'All 9 Windows PowerShell GUI smoke checks passed.'
 } finally {
     foreach ($form in $forms) { $form.Dispose() }
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue

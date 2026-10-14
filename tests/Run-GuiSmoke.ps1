@@ -31,6 +31,7 @@ try {
     $children = @(Get-GuiChildren $form)
     $tabs = @($children | Where-Object { $_ -is [System.Windows.Forms.TabPage] })
     Assert-Gui ('Clients and inventories' -in $tabs.Text -and 'Printers' -in $tabs.Text -and 'GPO deployment' -in $tabs.Text) 'Main GUI tabs are missing.'
+    Assert-Gui (@($children | Where-Object { $_ -is [System.Windows.Forms.ComboBox] -and $_.Items.Contains('ARM64') }).Count -eq 0) 'Global architecture selector remains.'
     Write-Host 'PASS Fresh configuration GUI constructs with a single Form result.'
 
     $status = New-PDLabel 'Test status'
@@ -93,6 +94,29 @@ try {
     Assert-Gui ($data.Config.ClientRemovals.Count -eq 1 -and $data.Config.ClientRemovals[0].UserSid -eq $user.UserSid) 'Combined inventory selection targeted the wrong context.'
     Write-Host 'PASS Combined inventory displays one computer and routes user removals correctly.'
 
+    $driverFolder=Join-Path $tempRoot 'Drivers\test'; New-Item -Path $driverFolder -ItemType Directory -Force | Out-Null
+    @'
+[Version]
+Class=Printer
+ClassVer=4.0
+[Manufacturer]
+Vendor=Models,NTamd64,NTarm64
+[Models.NTamd64]
+"Shared model"=Install,ID
+[Models.NTarm64]
+"Shared model"=Install,ID
+"ARM-only model"=Install,ARMID
+'@ | Set-Content (Join-Path $driverFolder 'printer.inf') -Encoding Unicode
+    $driverPrinter=[pscustomobject]@{ Name='ARM queue'; Kind='Type4'; Address='192.0.2.59'; PortNumber=9100; Location=''; Comment=''; PackagePath='Drivers\test'; InfPath='Drivers\test\printer.inf'; DriverName='ARM-only model' }
+    $driverEditor=New-PDPrinterEditorForm -Printer $driverPrinter -Root $tempRoot -Owner $form; $forms.Add($driverEditor)
+    $fields=@(Get-GuiChildren $driverEditor); $driverControl=($fields | Where-Object { $_.Name -eq 'DriverModel' }); $support=($fields | Where-Object { $_.Name -eq 'DriverSupport' })
+    Assert-Gui ($driverControl.Items.Contains('Shared model') -and $driverControl.Items.Contains('ARM-only model') -and $support.Text -match 'ARM64' -and $support.Text -notmatch 'x64,') 'ARM-only driver support was not displayed.'
+    $driverControl.SelectedItem='Shared model'
+    Assert-Gui ($support.Text -match 'x64, ARM64') 'Driver selection did not update architecture support.'
+    Invoke-GuiButton ($fields | Where-Object { $_ -is [System.Windows.Forms.Button] -and $_.Text -eq 'Save printer' })
+    Assert-Gui ($driverEditor.Tag.Result.DriverName -eq 'Shared model') 'Detected driver could not be saved.'
+    Write-Host 'PASS Driver editor detects both architectures and updates support for each selected model.'
+
     $config = New-PDConfiguration
     $sample = Read-PDConfiguration (Join-Path $projectRoot 'examples\printers.ipp.json')
     $config.Printers = @($sample.Printers)
@@ -104,7 +128,7 @@ try {
     $grids = @(Get-GuiChildren $loaded[0] | Where-Object { $_ -is [System.Windows.Forms.DataGridView] })
     Assert-Gui (@($grids | Where-Object { $_.Columns.Contains('Address') -and $_.Rows.Count -eq 1 }).Count -eq 1) 'Saved printer did not populate the main GUI.'
     Write-Host 'PASS Existing configuration populates the printer grid.'
-    Write-Host 'All 7 Windows PowerShell GUI smoke checks passed.'
+    Write-Host 'All 8 Windows PowerShell GUI smoke checks passed.'
 } finally {
     foreach ($form in $forms) { $form.Dispose() }
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue

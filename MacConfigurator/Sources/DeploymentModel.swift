@@ -153,7 +153,7 @@ final class DeploymentModel {
                 guard inf.path.hasPrefix(package.path + "/"), inf.pathExtension.lowercased() == "inf" else { throw DeploymentError("INF must be inside its package.") }
                 if resources {
                     try rejectLinks(in: package)
-                    let models = try INFModels.read(inf, architecture: text(config, "Architecture"), type: kind == "Type3" ? 3 : 4)
+                    let models = try INFModels.catalog(inf, type: kind == "Type3" ? 3 : 4).map { $0.name }
                     guard models.contains(where: { same($0, driver) }) else { throw DeploymentError("Driver name is absent from the selected INF: \(driver)") }
                 }
             } else { throw DeploymentError("Unknown printer type: \(kind)") }
@@ -182,7 +182,7 @@ final class DeploymentModel {
         guard let root = root else { throw DeploymentError("Open or create a deployment first.") }
         guard inf.standardizedFileURL.path.hasPrefix(source.standardizedFileURL.path + "/") else { throw DeploymentError("Choose an INF inside the selected complete vendor package.") }
         try Self.rejectLinks(in: source)
-        let models = try INFModels.read(inf, architecture: text(config, "Architecture"), type: type)
+        let models = try INFModels.catalog(inf, type: type).map { $0.name }
         let relative = "Drivers\\" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         let destination = try Self.resource(root, relative)
         guard !destination.path.hasPrefix(source.standardizedFileURL.path + "/") else { throw DeploymentError("Deployment folder cannot be inside the source package.") }

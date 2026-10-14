@@ -185,6 +185,21 @@ function Write-PDJson {
     } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force } }
 }
 
+function Get-PDInfDriverCatalog {
+    param([Parameter(Mandatory)][string]$Path, [ValidateSet(3,4)][int]$DriverType = 4)
+    $catalog = @{}
+    foreach ($architecture in @('x64','ARM64')) {
+        try { $models = @(Get-PDInfModels $Path $architecture -DriverType $DriverType) }
+        catch { if ($_.Exception.Message.StartsWith("No $architecture driver names found")) { continue }; throw }
+        foreach ($name in $models) {
+            if (-not $catalog.ContainsKey($name)) { $catalog[$name] = [pscustomobject]@{ Name=$name; Architectures=@() } }
+            $catalog[$name].Architectures += @($architecture)
+        }
+    }
+    if (-not $catalog.Count) { throw 'No x64 or ARM64 printer models found in the selected INF.' }
+    @($catalog.Values | Sort-Object Name)
+}
+
 function Assert-PDConfiguration {
     param([Parameter(Mandatory)]$Config, [Parameter(Mandatory)][string]$Root)
     if ($Config.SchemaVersion -ne 1) { throw 'Unsupported configuration schema.' }
@@ -217,7 +232,7 @@ function Assert-PDConfiguration {
             if (-not (Test-Path -LiteralPath $package -PathType Container) -or -not (Test-Path -LiteralPath $inf -PathType Leaf)) { throw "Missing package or INF for $($p.Name)." }
             if (-not $inf.StartsWith($package.TrimEnd('\','/') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetExtension($inf) -ne '.inf') { throw 'INF must be inside its driver package.' }
             if (@(Get-ChildItem -LiteralPath $package -Recurse -Force | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }).Count) { throw 'Driver packages must not contain links or junctions.' }
-            $models = @(Get-PDInfModels $inf $Config.Architecture -DriverType ([int]$p.Kind.Substring(4)))
+            $models = @(Get-PDInfDriverCatalog $inf -DriverType ([int]$p.Kind.Substring(4)) | ForEach-Object { $_.Name })
             if ($p.DriverName -notin $models) { throw "Driver name is not in the selected INF: $($p.DriverName)" }
         } else { throw "Unknown printer kind: $($p.Kind)" }
     }

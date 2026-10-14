@@ -6,7 +6,7 @@ func expectError(_ body: () throws -> Void) throws { do { try body() } catch { r
 
 @main struct ModelTests {
     static func main() {
-        do { try run(); print("All 12 Mac model checks passed.") } catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+        do { try run(); print("All 13 Mac model checks passed.") } catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
     }
     static func run() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("pd-mac-tests-" + UUID().uuidString)
@@ -53,6 +53,11 @@ func expectError(_ body: () throws -> Void) throws { do { try body() } catch { r
         try expect(values.count == 3 && values.contains("Neutral driver") && values.contains("Printer; equals = and comma, name"), "INF parsing failed.")
         try expect(try INFModels.read(inf, architecture: "ARM64", type: 4) == ["ARM model"], "INF architecture failed.")
         try expectError { _ = try INFModels.read(inf, architecture: "x64", type: 3) }; print("PASS UTF16 INF model strings, punctuation and architecture")
+        let catalog = try INFModels.catalog(inf, type: 4)
+        try expect(catalog.count == 4 && catalog.first { $0.name == "ARM model" }?.architectures == ["ARM64"], "Architecture union or ARM-only label failed.")
+        let dual = vendor.appendingPathComponent("dual.inf"); try Data(contents.replacingOccurrences(of: "\"ARM model\"=Install,ID4", with: "\"Neutral driver\"=Install,ID4").utf8).write(to: dual)
+        try expect(try INFModels.catalog(dual, type: 4).first { $0.name == "Neutral driver" }?.architectures == ["x64", "ARM64"], "Dual architecture detection failed.")
+        print("PASS driver catalog detects architectures per model")
         let type3 = vendor.appendingPathComponent("legacy.inf"); try Data(contents.replacingOccurrences(of: "ClassVer=4.0 ; Type4", with: "").utf8).write(to: type3)
         try expect(try INFModels.read(type3, architecture: "x64", type: 3).count == 3, "Type3 models missing."); print("PASS explicit Type3 support")
         let staging = root.appendingPathComponent("Staging"); try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)

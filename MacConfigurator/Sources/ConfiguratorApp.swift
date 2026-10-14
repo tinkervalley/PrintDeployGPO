@@ -58,11 +58,13 @@ final class PrinterEditor: NSObject, NSWindowDelegate {
     let model: DeploymentModel
     let original: JSON
     let originalEndpoint: IppEndpoint?
-    let dialog = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 560), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    let dialog = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 620), styleMask: [.titled, .closable], backing: .buffered, defer: false)
     let name = NSTextField(), host = NSTextField(), path = NSTextField(string: "/ipp"), port = NSTextField(string: "631"), location = NSTextField(), comment = NSTextField()
     let kind = NSPopUpButton(), scheme = NSPopUpButton(), driver = NSPopUpButton()
     let packageLabel = NSTextField(wrappingLabelWithString: "Import the full extracted vendor package.")
     var packagePath = "", infPath = ""
+    var catalog = [DriverModel]()
+    let support = NSTextField(wrappingLabelWithString: "")
     let customPort = NSButton(checkboxWithTitle: "Custom port", target: nil, action: nil)
     var result: JSON?
     var tcpPort = "9100", ippPort = "631", lastKind = ""
@@ -78,13 +80,14 @@ final class PrinterEditor: NSObject, NSWindowDelegate {
         let portField = stack([customPort, port]); port.widthAnchor.constraint(equalToConstant: 100).isActive = true
         protocolRow = row("Protocol", scheme); pathRow = row("Subpath", path)
         let importButton = ActionButton("Import driver package…") { [weak self] in self?.importDriver() }
-        packageRow = row("Driver package", stack([packageLabel, importButton], vertical: true)); driverRow = row("Driver name", driver)
+        packageRow = row("Driver package", stack([packageLabel, importButton], vertical: true)); driverRow = row("Driver name", stack([driver, support], vertical: true))
         let hint = label("Enter only an IP address or hostname. IPP/IPPS use port 631 automatically. For IPPS, use a hostname matching a trusted printer certificate.")
         hint.textColor = .secondaryLabelColor
         let save = ActionButton("Save printer") { [weak self] in self?.save() }; save.keyEquivalent = "\r"
         let cancel = ActionButton("Cancel") { [weak self] in NSApp.stopModal(withCode: .cancel); self?.dialog.orderOut(nil) }; cancel.keyEquivalent = "\u{1b}"
         let body = stack([row("Printer name", name), row("Connection", kind), row("IP / hostname", host), protocolRow, pathRow, row("Port", portField), row("Location", location), row("Comment", comment), packageRow, driverRow, hint, stack([cancel, save])], vertical: true)
         body.spacing = 14; fill(body, in: dialog.contentView!, inset: 22)
+        for view in body.arrangedSubviews.dropLast() { view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
         name.stringValue = text(original, "Name"); host.stringValue = text(original, "Address"); location.stringValue = text(original, "Location"); comment.stringValue = text(original, "Comment")
         packagePath = text(original, "PackagePath"); infPath = text(original, "InfPath")
         if let endpoint = originalEndpoint {
@@ -95,28 +98,34 @@ final class PrinterEditor: NSObject, NSWindowDelegate {
         if !text(original, "Kind").isEmpty { kind.selectItem(withTitle: text(original, "Kind")) }
         if text(original, "Kind") != "IPP", let number = original["PortNumber"] as? Int { tcpPort = String(number) }
         kind.target = self; kind.action = #selector(kindChanged); scheme.target = self; scheme.action = #selector(protocolChanged); customPort.target = self; customPort.action = #selector(protocolChanged)
+        driver.target = self; driver.action = #selector(driverChanged)
         kindChanged()
         if !infPath.isEmpty, text(original, "Kind") != "IPP", let root = model.root {
-            do { let values = try INFModels.read(DeploymentModel.resource(root, infPath), architecture: text(model.config, "Architecture"), type: kind.titleOfSelectedItem == "Type3" ? 3 : 4); driver.addItems(withTitles: values); driver.selectItem(withTitle: text(original, "DriverName")); packageLabel.stringValue = infPath }
+            do { catalog = try INFModels.catalog(DeploymentModel.resource(root, infPath), type: kind.titleOfSelectedItem == "Type3" ? 3 : 4); driver.addItems(withTitles: catalog.map { $0.name }); driver.selectItem(withTitle: text(original, "DriverName")); packageLabel.stringValue = infPath; driverChanged() }
             catch { packageLabel.stringValue = "Package needs attention: \(error.localizedDescription)" }
         }
     }
     @objc func kindChanged() {
         if lastKind == "IPP" { ippPort = port.stringValue } else if !lastKind.isEmpty { tcpPort = port.stringValue }
         let current = kind.titleOfSelectedItem ?? "IPP", ipp = current == "IPP"
-        if !lastKind.isEmpty && lastKind != "IPP" && current != "IPP" && lastKind != current { packagePath = ""; infPath = ""; driver.removeAllItems(); packageLabel.stringValue = "Import a package for \(current)." }
+        if !lastKind.isEmpty && lastKind != "IPP" && current != "IPP" && lastKind != current { packagePath = ""; infPath = ""; driver.removeAllItems(); catalog = []; support.stringValue = ""; packageLabel.stringValue = "Import a package for \(current)." }
         protocolRow.isHidden = !ipp; pathRow.isHidden = !ipp; packageRow.isHidden = ipp; driverRow.isHidden = ipp; customPort.isHidden = !ipp
         port.stringValue = ipp ? ippPort : tcpPort; port.isEnabled = !ipp || customPort.state == .on; lastKind = current
     }
     @objc func protocolChanged() {
         if kind.titleOfSelectedItem == "IPP" { port.isEnabled = customPort.state == .on; if !port.isEnabled { port.stringValue = String(IppEndpoint.defaultPort(scheme.titleOfSelectedItem ?? "ipp")) } }
     }
+    @objc func driverChanged() {
+        let selected = catalog.first { same($0.name, driver.titleOfSelectedItem ?? "") }
+        support.stringValue = selected.map { "INF models: " + $0.architectures.joined(separator: ", ") + ". Windows checks OS compatibility, binaries and signatures at installation." } ?? "Import a package and select a driver to see its architecture declarations."
+        support.textColor = .secondaryLabelColor
+    }
     func importDriver() {
         let folder = NSOpenPanel(); folder.canChooseDirectories = true; folder.canChooseFiles = false; folder.prompt = "Choose package"; folder.message = "Choose the complete extracted vendor driver folder."
         guard folder.runModal() == .OK, let source = folder.url else { return }
         let picker = NSOpenPanel(); picker.directoryURL = source; picker.allowedContentTypes = [UTType(filenameExtension: "inf") ?? .data]; picker.message = "Select the printer INF inside this package."
         guard picker.runModal() == .OK, let inf = picker.url else { return }
-        do { let imported = try model.importPackage(source, inf: inf, type: kind.titleOfSelectedItem == "Type3" ? 3 : 4); packagePath = imported.0; infPath = imported.1; packageLabel.stringValue = infPath; driver.removeAllItems(); driver.addItems(withTitles: imported.2) } catch { errorAlert(error) }
+        do { let imported = try model.importPackage(source, inf: inf, type: kind.titleOfSelectedItem == "Type3" ? 3 : 4); packagePath = imported.0; infPath = imported.1; packageLabel.stringValue = infPath; driver.removeAllItems(); driver.addItems(withTitles: imported.2); catalog = try INFModels.catalog(inf, type: kind.titleOfSelectedItem == "Type3" ? 3 : 4); driverChanged() } catch { errorAlert(error) }
     }
     func makePrinter() throws -> JSON {
         var printer = original
@@ -143,7 +152,7 @@ final class ConfiguratorController: NSObject, NSWindowDelegate, NSTextFieldDeleg
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 800), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
     let folderLabel = NSTextField(labelWithString: "Open printers.json from a local folder or a Finder-mounted SMB share.")
     let status = NSTextField(labelWithString: "Ready")
-    let windowsRoot = NSTextField(), architecture = NSPopUpButton()
+    let windowsRoot = NSTextField()
     let tabs = NSTabView()
     let printerTable = DataTable([("Name", "Printer", 220), ("Kind", "Type", 80), ("Address", "Endpoint", 330), ("Driver", "Driver", 220), ("Location", "Location", 130)])
     let computerTable = DataTable([("Name", "Computer", 160), ("Status", "Status", 250), ("Installed", "Deployed", 110), ("Users", "User reports", 110), ("Reported", "Latest report", 250)])
@@ -162,9 +171,8 @@ final class ConfiguratorController: NSObject, NSWindowDelegate, NSTextFieldDeleg
         let title = label("PrintDeployGPO", bold: true); title.font = .boldSystemFont(ofSize: 23)
         let subtitle = label("Manage Windows printer deployments from your Mac."); subtitle.textColor = .secondaryLabelColor
         let top = stack([title, subtitle, ActionButton("Open JSON…") { [weak self] in self?.chooseOpen() }, ActionButton("New deployment…") { [weak self] in self?.createDeployment() }])
-        architecture.addItems(withTitles: ["x64", "ARM64"]); architecture.target = self; architecture.action = #selector(settingsChanged)
         windowsRoot.placeholderString = "\\\\fileserver\\Software\\Printers"; windowsRoot.delegate = self
-        let settings = stack([label("Driver models"), architecture, label("Windows UNC folder"), windowsRoot]); windowsRoot.widthAnchor.constraint(greaterThanOrEqualToConstant: 450).isActive = true
+        let settings = stack([label("Windows UNC folder"), windowsRoot]); windowsRoot.widthAnchor.constraint(greaterThanOrEqualToConstant: 450).isActive = true
         let bottom = stack([ActionButton("Save JSON") { [weak self] in self?.save(export: false) }, ActionButton("Save deployment bundle") { [weak self] in self?.save(export: true) }, ActionButton("Validate") { [weak self] in self?.validate() }, ActionButton("Reload") { [weak self] in self?.reload() }])
         let body = stack([top, folderLabel, settings, tabs, bottom, status], vertical: true); body.spacing = 14
         fill(body, in: window.contentView!, inset: 20)
@@ -209,7 +217,7 @@ final class ConfiguratorController: NSObject, NSWindowDelegate, NSTextFieldDeleg
         addTab("Advanced cleanup", body)
     }
     func addDeploymentTab() {
-        let steps = label("1. Mount the share in Finder (Go → Connect to Server → smb://server/share). Open its printers.json, or create a deployment folder.\n\n2. Enter that folder's Windows UNC path above, then Save deployment bundle.\n\n3. Add Install-PrinterDeploymentTask.ps1 to Computer GPO → Startup → PowerShell Scripts. Leave parameters blank. It creates ONE SYSTEM scheduled task.\n\n4. Add Report-UserPrinters.ps1 to User GPO → Logon → PowerShell Scripts. Leave parameters blank. It creates NO task and reports each user's shared-printer connections.\n\n5. In Computers, refresh reports and select unwanted queues. Save your changes. Stop deploying managed printers before selecting them for removal.\n\nIPP printers work on x64 and ARM64. Driver models selects which INF names to browse; clients check their native architecture and skip incompatible packages. Both GUIs edit the same schema and preserve DeploymentId. Use one administrator at a time; saving checks for concurrent file changes.")
+        let steps = label("1. Mount the share in Finder (Go → Connect to Server → smb://server/share). Open its printers.json, or create a deployment folder.\n\n2. Enter that folder's Windows UNC path above, then Save deployment bundle.\n\n3. Add Install-PrinterDeploymentTask.ps1 to Computer GPO → Startup → PowerShell Scripts. Leave parameters blank. It creates ONE SYSTEM scheduled task.\n\n4. Add Report-UserPrinters.ps1 to User GPO → Logon → PowerShell Scripts. Leave parameters blank. It creates NO task and reports each user's shared-printer connections.\n\n5. In Computers, refresh reports and select unwanted queues. Save your changes. Stop deploying managed printers before selecting them for removal.\n\nIPP printers work on x64 and ARM64. Driver support is detected per selected INF model; clients check their native architecture and skip incompatible packages. Both GUIs edit the same schema and preserve DeploymentId. Use one administrator at a time; saving checks for concurrent file changes.")
         let permissions = label("Configure SMB and NTFS permissions from Windows: reporting computers/users need SMB Change, NTFS Read on scripts/config/drivers, and write/create-own-folder access only inside Client Logs. The Mac app creates that folder but cannot apply the Windows public log ACL. Use the Windows GUI's Set public log access button or configure the ACL on the server. Sign exported scripts if your policy requires it.")
         permissions.textColor = .secondaryLabelColor
         let body = stack([label("One scheduled task, plus a user logon script", bold: true), steps, permissions], vertical: true)
@@ -233,7 +241,7 @@ final class ConfiguratorController: NSObject, NSWindowDelegate, NSTextFieldDeleg
         do { try model.create(in: folder); loadControls(); refreshReports(); updateStatus("New deployment. Enter the Windows UNC folder before exporting a bundle.") } catch { errorAlert(error) }
     }
     func loadControls() {
-        loading = true; architecture.selectItem(withTitle: text(model.config, "Architecture")); let cleanup = model.config["Cleanup"] as? JSON ?? [:]
+        loading = true; let cleanup = model.config["Cleanup"] as? JSON ?? [:]
         stale.state = flag(cleanup, "RemoveStaleManaged") ? .on : .off; userCleanup.state = flag(cleanup, "CleanupUserConnections") ? .on : .off; legacy.string = (cleanup["LegacyPrinterNames"] as? [String] ?? []).joined(separator: "\n")
         folderLabel.stringValue = model.configURL?.path ?? "No deployment open"
         windowsRoot.stringValue = model.root.flatMap { UserDefaults.standard.string(forKey: "UNC:" + $0.path) } ?? inferredUNC()
@@ -244,7 +252,7 @@ final class ConfiguratorController: NSObject, NSWindowDelegate, NSTextFieldDeleg
               let expression = try? NSRegularExpression(pattern: "(?m)^\\s*\\$root = '((?:[^']|'')*)'\\r?$"), let match = expression.firstMatch(in: source, range: NSRange(source.startIndex..., in: source)), let range = Range(match.range(at: 1), in: source) else { return "" }
         return String(source[range]).replacingOccurrences(of: "''", with: "'")
     }
-    @objc func settingsChanged() { if loading { return }; model.config["Architecture"] = architecture.titleOfSelectedItem; var cleanup = model.config["Cleanup"] as? JSON ?? [:]; cleanup["RemoveStaleManaged"] = stale.state == .on; cleanup["CleanupUserConnections"] = userCleanup.state == .on; cleanup["LegacyPrinterNames"] = legacy.string.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }; model.config["Cleanup"] = cleanup; model.dirty = true; updateStatus("Unsaved configuration changes.") }
+    @objc func settingsChanged() { if loading { return }; var cleanup = model.config["Cleanup"] as? JSON ?? [:]; cleanup["RemoveStaleManaged"] = stale.state == .on; cleanup["CleanupUserConnections"] = userCleanup.state == .on; cleanup["LegacyPrinterNames"] = legacy.string.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }; model.config["Cleanup"] = cleanup; model.dirty = true; updateStatus("Unsaved configuration changes.") }
     @objc func legacyChanged() { settingsChanged() }
     func controlTextDidChange(_ obj: Notification) { updateStatus("Windows UNC path is used for bundle exports and stored locally on this Mac.") }
     func updateStatus(_ message: String) { status.stringValue = message; window.isDocumentEdited = model.dirty; window.representedURL = model.configURL }

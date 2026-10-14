@@ -1,6 +1,26 @@
 import Foundation
 
+struct DriverModel {
+    let name: String
+    var architectures: [String]
+}
+
 enum INFModels {
+    static func catalog(_ url: URL, type: Int) throws -> [DriverModel] {
+        var entries = [String: DriverModel]()
+        for architecture in ["x64", "ARM64"] {
+            let names: [String]
+            do { names = try read(url, architecture: architecture, type: type) }
+            catch { if error.localizedDescription.hasPrefix("No \(architecture) driver names found") { continue }; throw error }
+            for name in names {
+                let key = name.lowercased()
+                if entries[key] == nil { entries[key] = DriverModel(name: name, architectures: []) }
+                entries[key]?.architectures.append(architecture)
+            }
+        }
+        guard !entries.isEmpty else { throw DeploymentError("No x64 or ARM64 models found in the selected INF.") }
+        return entries.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
     static func uncomment(_ line: String) -> String {
         var quoted = false, result = ""
         for character in line {

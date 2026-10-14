@@ -38,6 +38,15 @@ enum MacSmoke {
         guard let checkbox = controller.inventoryTable.tableView(controller.inventoryTable.table, viewFor: column, row: userRow) as? NSButton else { throw DeploymentError("Native inventory removal control is missing.") }
         checkbox.performClick(nil)
         guard controller.model.removals.count == 1, text(controller.model.removals[0], "UserSid") == sid else { throw DeploymentError("Native inventory checkbox lost its user scope.") }
+        let vendor = root.appendingPathComponent("Drivers/test"); try FileManager.default.createDirectory(at: vendor, withIntermediateDirectories: true)
+        let inf = "[Version]\nClass=Printer\nClassVer=4.0\n[Manufacturer]\nVendor=Models,NTamd64,NTarm64\n[Models.NTamd64]\n\"Shared\"=Install,ID\n[Models.NTarm64]\n\"Shared\"=Install,ID\n\"ARM-only\"=Install,ARMID\n"
+        try Data(inf.utf8).write(to: vendor.appendingPathComponent("printer.inf"))
+        let driverPrinter: JSON = ["Name": "ARM queue", "Kind": "Type4", "Address": "192.0.2.59", "PortNumber": 9100, "Location": "", "Comment": "", "PackagePath": "Drivers\\test", "InfPath": "Drivers\\test\\printer.inf", "DriverName": "ARM-only"]
+        let driverEditor = PrinterEditor(model: model, printer: driverPrinter)
+        guard driverEditor.driver.itemTitles.count == 2, driverEditor.support.stringValue.contains("ARM64"), !driverEditor.support.stringValue.contains("x64,") else { throw DeploymentError("Native ARM-only driver label failed.") }
+        driverEditor.driver.selectItem(withTitle: "Shared"); driverEditor.driverChanged()
+        guard driverEditor.support.stringValue.contains("x64, ARM64") else { throw DeploymentError("Native driver support did not update with selection.") }
+        _ = try driverEditor.makePrinter(); driverEditor.dialog.close()
         controller.window.contentView?.layoutSubtreeIfNeeded()
         if let directory = ProcessInfo.processInfo.environment["PD_MAC_SCREENSHOTS"] {
             let destination = URL(fileURLWithPath: directory); try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)

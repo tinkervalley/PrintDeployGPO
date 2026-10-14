@@ -125,8 +125,8 @@ function New-PDPrinterEditorForm {
     $portPanel = New-Object Windows.Forms.FlowLayoutPanel; $portPanel.AutoSize = $true; $portPanel.Controls.AddRange(@($customPort, $port))
     $location = New-Object Windows.Forms.TextBox; $comment = New-Object Windows.Forms.TextBox
     $package = New-Object Windows.Forms.TextBox; $package.ReadOnly = $true
-    $model = New-Object Windows.Forms.ComboBox; $model.DropDownStyle = 'DropDownList'
-    $hint = New-Object Windows.Forms.Label; $hint.AutoSize = $true; $hint.MaximumSize = '590,0'
+    $model = New-Object Windows.Forms.ComboBox; $model.Name = 'DriverModel'; $model.DropDownStyle = 'DropDownList'
+    $hint = New-Object Windows.Forms.Label; $hint.Name = 'DriverSupport'; $hint.AutoSize = $true; $hint.MaximumSize = '590,0'
     $hint.Text = 'Enter an IP address or hostname. IPP/IPPS use port 631 automatically; enable a custom port if needed (for example 443). IPPS requires a trusted certificate matching the hostname.'
     $labels = @('Printer name', 'Connection type', 'IP address / hostname', 'IPP protocol', 'IPP subpath', 'Port', 'Location', 'Comment', 'Packaged INF', 'Detected driver name')
     $controls = @($name, $kind, $address, $protocol, $subpath, $portPanel, $location, $comment, $package, $model)
@@ -140,7 +140,7 @@ function New-PDPrinterEditorForm {
     $buttons = New-Object Windows.Forms.FlowLayoutPanel; $buttons.Dock = 'Fill'; $buttons.AutoSize = $true
     $layout.Controls.Add($buttons, 1, 11)
     # Mutable dialog data is captured by event-handler closures.
-    $data = @{ PackagePath = ''; InfPath = ''; Result = $null; OriginalAddress = ''; OriginalParts = $null; TcpPort = 9100; IppPort = 631; PreviousKind = '' }
+    $data = @{ PackagePath = ''; InfPath = ''; Result = $null; OriginalAddress = ''; OriginalParts = $null; TcpPort = 9100; IppPort = 631; PreviousKind = ''; DriverCatalog = @() }
     $import = New-PDButton 'Import driver package...' $null
     $import.Add_Click({
         try {
@@ -154,7 +154,8 @@ function New-PDPrinterEditorForm {
             try { if ($choose.ShowDialog($dialog) -ne 'OK') { return }; $inf = $choose.FileName }
             finally { $choose.Dispose() }
             if (-not $inf.StartsWith($source.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Select an INF inside the package folder.' }
-            $models = @(Get-PDInfModels -Path $inf -Architecture $Architecture -DriverType ([int]([string]$kind.SelectedItem).Substring(4)))
+            $data.DriverCatalog = @(Get-PDInfDriverCatalog -Path $inf -DriverType ([int]([string]$kind.SelectedItem).Substring(4)))
+            $models = @($data.DriverCatalog | ForEach-Object { $_.Name })
             $relativePackage = 'Drivers\' + [guid]::NewGuid().ToString('N')
             $destination = Resolve-PDResource $Root $relativePackage
             Copy-PDPackage $source $destination
@@ -182,7 +183,7 @@ function New-PDPrinterEditorForm {
                 PortNumber = [int]$port.Value; Location = $location.Text.Trim(); Comment = $comment.Text.Trim()
                 PackagePath = $data.PackagePath; InfPath = $data.InfPath; DriverName = [string]$model.SelectedItem
             }
-            $testConfig = New-PDConfiguration; $testConfig.Architecture = $Architecture; $testConfig.Printers = @($result)
+            $testConfig = New-PDConfiguration; $testConfig.Printers = @($result)
             Assert-PDConfiguration $testConfig $Root
             $data.Result = $result; $dialog.DialogResult = 'OK'; $dialog.Close()
         } catch { Show-PDError $_ }
@@ -192,7 +193,7 @@ function New-PDPrinterEditorForm {
     $kind.Add_SelectedIndexChanged({
         $tcp = $kind.SelectedItem -in @('Type3','Type4')
         if ($tcp -and $data.PreviousKind -in @('Type3','Type4') -and $data.PreviousKind -ne [string]$kind.SelectedItem) {
-            $data.PackagePath = ''; $data.InfPath = ''; $package.Text = ''; $model.Items.Clear()
+            $data.PackagePath = ''; $data.InfPath = ''; $data.DriverCatalog = @(); $package.Text = ''; $model.Items.Clear()
         }
         foreach ($row in @(3,4,8,9)) {
             $visible = if ($row -lt 5) { -not $tcp } else { $tcp }
@@ -204,6 +205,8 @@ function New-PDPrinterEditorForm {
         if ($tcp) { $port.Value = $data.TcpPort } else { $port.Value = $data.IppPort }
         $data.PreviousKind = [string]$kind.SelectedItem
         $protocol.Enabled = -not $tcp; $subpath.Enabled = -not $tcp; $customPort.Visible = -not $tcp
+        if ($tcp) { $hint.Text = 'Import a package and select a driver to see its declared x64/ARM64 model support.' }
+        else { $hint.Text = 'IPP/IPPS work on x64 and ARM64 without a vendor driver package. Port 631 is automatic. IPPS requires a trusted certificate matching the hostname.' }
         $port.Enabled = $tcp -or $customPort.Checked; $model.Enabled = $tcp; $package.Enabled = $tcp; $import.Enabled = $tcp; $import.Visible = $tcp
     }.GetNewClosure())
     $customPort.Add_CheckedChanged({
@@ -212,6 +215,10 @@ function New-PDPrinterEditorForm {
     }.GetNewClosure())
     $protocol.Add_SelectedIndexChanged({
         if ($kind.SelectedItem -eq 'IPP' -and -not $customPort.Checked) { $port.Value = Get-PDIppDefaultPort $protocol.SelectedItem }
+    }.GetNewClosure())
+    $model.Add_SelectedIndexChanged({
+        $entry=@($data.DriverCatalog | Where-Object { $_.Name -eq [string]$model.SelectedItem })
+        if ($entry.Count) { $hint.Text = 'Selected driver INF declares models for: ' + ($entry[0].Architectures -join ', ') + '. Windows still checks OS compatibility, binaries and signatures during installation.' }
     }.GetNewClosure())
     $kind.SelectedIndex = 0
     if ($Printer) {
@@ -228,7 +235,8 @@ function New-PDPrinterEditorForm {
         $data.PackagePath = $Printer.PackagePath; $data.InfPath = $Printer.InfPath; $package.Text = $Printer.InfPath
         if ($Printer.Kind -in @('Type3','Type4')) {
             try {
-                $models = @(Get-PDInfModels (Resolve-PDResource $Root $Printer.InfPath) $Architecture -DriverType ([int]$Printer.Kind.Substring(4)))
+                $data.DriverCatalog = @(Get-PDInfDriverCatalog (Resolve-PDResource $Root $Printer.InfPath) -DriverType ([int]$Printer.Kind.Substring(4)))
+                $models = @($data.DriverCatalog | ForEach-Object { $_.Name })
                 $model.Items.AddRange([object[]]$models); $model.SelectedItem = $Printer.DriverName
             } catch { Show-PDError $_ }
         }
@@ -462,9 +470,8 @@ function New-PDConfigurationForm {
     [void]$settings.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Absolute', 160)))
     $layout.Controls.Add($settings, 0, 1)
     $rootBox = New-Object Windows.Forms.TextBox; $rootBox.ReadOnly = $true; $rootBox.Dock = 'Fill'; $rootBox.Text = $data.Root
-    $architecture = New-Object Windows.Forms.ComboBox; $architecture.DropDownStyle = 'DropDownList'; $architecture.Items.AddRange(@('x64','ARM64')); $architecture.SelectedItem = $data.Config.Architecture
     $settings.Controls.Add((New-PDLabel 'Deployment folder'), 0, 0); $settings.Controls.Add($rootBox, 1, 0)
-    $settings.Controls.Add((New-PDLabel 'Driver model list'), 0, 1); $settings.Controls.Add($architecture, 1, 1)
+    $settings.Controls.Add((New-PDLabel 'Driver support is detected per printer; IPP works on x64 and ARM64.'), 1, 1)
     $tabs = New-Object Windows.Forms.TabControl; $tabs.Dock = 'Fill'; $layout.Controls.Add($tabs, 0, 2)
     $printersTab = New-Object Windows.Forms.TabPage; $printersTab.Text = 'Printers'; $printersTab.Padding = '10,10,10,10'
     $cleanupTab = New-Object Windows.Forms.TabPage; $cleanupTab.Text = 'Advanced cleanup'; $cleanupTab.Padding = '16,12,16,12'
@@ -517,7 +524,6 @@ function New-PDConfigurationForm {
         $legacy.Lines = [string[]]@($data.Config.Cleanup.LegacyPrinterNames)
     }.GetNewClosure()
     $sync = {
-        $data.Config.Architecture = [string]$architecture.SelectedItem
         $data.Config.Cleanup.RemoveStaleManaged = $stale.Checked; $data.Config.Cleanup.CleanupUserConnections = $user.Checked
         $data.Config.Cleanup.LegacyPrinterNames = @($legacy.Lines | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Select-Object -Unique)
     }.GetNewClosure()
@@ -554,7 +560,7 @@ function New-PDConfigurationForm {
     $add.Add_Click({
         try {
             if (-not $data.Root) { throw 'Choose the deployment folder first.' }
-            $p = Show-PDPrinterEditor -Root $data.Root -Architecture ([string]$architecture.SelectedItem) -Owner $form
+            $p = Show-PDPrinterEditor -Root $data.Root -Owner $form
             if ($p) {
                 if ($p.Name -in @($data.Config.Printers | ForEach-Object { $_.Name })) { throw 'A printer with this name is already configured.' }
                 $data.Config.Printers = @($data.Config.Printers) + @($p); $data.Dirty = $true; & $refresh
@@ -566,7 +572,7 @@ function New-PDConfigurationForm {
         try {
             if ($grid.SelectedRows.Count -ne 1) { return }
             $old = $grid.SelectedRows[0].Tag
-            $p = Show-PDPrinterEditor -Printer $old -Root $data.Root -Architecture ([string]$architecture.SelectedItem) -Owner $form
+            $p = Show-PDPrinterEditor -Printer $old -Root $data.Root -Owner $form
             if ($p) {
                 $others = @($data.Config.Printers | Where-Object { $_.Name -ne $old.Name })
                 if ($p.Name -in @($others | ForEach-Object { $_.Name })) { throw 'A printer with this name is already configured.' }
@@ -590,7 +596,7 @@ function New-PDConfigurationForm {
             $picker = New-Object Windows.Forms.OpenFileDialog; $picker.Filter = 'Printer configuration (*.json)|*.json'
             try { if ($picker.ShowDialog($form) -ne 'OK') { return }; $path = $picker.FileName } finally { $picker.Dispose() }
             $config = Read-PDConfiguration $path; $root = Split-Path -Parent $path; Assert-PDConfiguration $config $root
-            $data.Config = $config; $data.Root = $root; $architecture.SelectedItem = $config.Architecture; & $loadCleanup; & $refresh
+            $data.Config = $config; $data.Root = $root; & $loadCleanup; & $refresh
             $data.Dirty = $false; $status.Text = 'Configuration loaded.'
         } catch { Show-PDError $_ }
     }.GetNewClosure())
@@ -619,7 +625,6 @@ function New-PDConfigurationForm {
     $actions.Controls.AddRange(@($load,$validate,$publish,$copy))
     foreach ($control in @($stale,$user)) { $control.Add_CheckedChanged({ $data.Dirty = $true }.GetNewClosure()) }
     $legacy.Add_TextChanged({ $data.Dirty = $true }.GetNewClosure())
-    $architecture.Add_SelectedIndexChanged({ $data.Dirty = $true }.GetNewClosure())
     $form.Add_FormClosing({
         param($sender,$eventArgs)
         if ($data.Dirty -and [Windows.Forms.MessageBox]::Show('Close without saving configuration changes?', 'Unsaved changes', 'YesNo', 'Question') -ne 'Yes') { $eventArgs.Cancel = $true }

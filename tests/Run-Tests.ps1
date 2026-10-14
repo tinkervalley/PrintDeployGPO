@@ -97,6 +97,17 @@ Model="Test Printer v4"
         (Get-Content $inf -Raw).Replace('%Model%=Install','%Missing%=Install') | Set-Content $bad
         Assert-Throws { Get-PDInfModels $bad } 'Unresolved INF string'
     }
+    Test-Case 'Driver catalog combines x64 and ARM64 and reports support per selected model' {
+        $catalog=@(Get-PDInfDriverCatalog $inf)
+        Assert-True ($catalog.Count -eq 4) 'Architecture union omitted models.'
+        Assert-True (@($catalog | Where-Object { $_.Name -eq 'ARM printer' })[0].Architectures[0] -eq 'ARM64') 'ARM-only model was incorrectly labelled.'
+        $both=Join-Path $packagePath 'both.inf'
+        (Get-Content $inf -Raw).Replace('"ARM printer"=Install,ARMHWID','%Model%=Install,ARMHWID') | Set-Content $both -Encoding Unicode
+        $entry=@(Get-PDInfDriverCatalog $both | Where-Object { $_.Name -eq 'Test Printer v4' })[0]
+        Assert-True ($entry.Architectures.Count -eq 2 -and 'x64' -in $entry.Architectures -and 'ARM64' -in $entry.Architectures) 'Dual architecture support was not detected.'
+        $config=New-PDConfiguration; $printer=New-TestPrinter 'ARM queue' 'Type4'; $printer.Address='192.0.2.59'; $printer.PackagePath='Drivers\vendor'; $printer.InfPath='Drivers\vendor\printer.inf'; $printer.DriverName='ARM printer'; $config.Printers=@($printer)
+        Assert-PDConfiguration $config $tempRoot
+    }
     Test-Case 'IPP is architecture independent and packaged drivers match native INF models' {
         $printer=New-TestPrinter
         Assert-True (Test-PDPrinterArchitecture $printer $tempRoot ARM64) 'IPP incorrectly requires architecture-specific resources.'

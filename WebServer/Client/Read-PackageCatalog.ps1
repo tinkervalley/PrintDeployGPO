@@ -1,6 +1,7 @@
 #requires -Version 5.1
 param([string]$Root,[ValidateSet(3,4)][int]$DriverType,[string]$CoreModule)
 $ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 try {
     Import-Module $CoreModule -Force
     $base=[IO.Path]::GetFullPath($Root).TrimEnd('\','/')

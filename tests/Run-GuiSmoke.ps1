@@ -113,6 +113,8 @@ Vendor=Models,NTamd64,NTarm64
     Assert-Gui ($driverControl.Items.Contains('Shared model') -and $driverControl.Items.Contains('ARM-only model') -and $support.Text -match 'ARM64' -and $support.Text -notmatch 'x64,') 'ARM-only driver support was not displayed.'
     $driverControl.SelectedItem='Shared model'
     Assert-Gui ($support.Text -match 'x64, ARM64') 'Driver selection did not update architecture support.'
+    $connection=($fields | Where-Object { $_ -is [System.Windows.Forms.ComboBox] -and $_.Items.Contains('Type4') }); $connection.SelectedItem='IPP'; $connection.SelectedItem='Type4'
+    Assert-Gui ($support.Text -match 'x64, ARM64') 'Connection switching lost the selected driver support label.'
     Invoke-GuiButton ($fields | Where-Object { $_ -is [System.Windows.Forms.Button] -and $_.Text -eq 'Save printer' })
     Assert-Gui ($driverEditor.Tag.Result.DriverName -eq 'Shared model') 'Detected driver could not be saved.'
     Write-Host 'PASS Driver editor detects both architectures and updates support for each selected model.'

@@ -205,7 +205,11 @@ function New-PDPrinterEditorForm {
         if ($tcp) { $port.Value = $data.TcpPort } else { $port.Value = $data.IppPort }
         $data.PreviousKind = [string]$kind.SelectedItem
         $protocol.Enabled = -not $tcp; $subpath.Enabled = -not $tcp; $customPort.Visible = -not $tcp
-        if ($tcp) { $hint.Text = 'Import a package and select a driver to see its declared x64/ARM64 model support.' }
+        if ($tcp) {
+            $entry=@($data.DriverCatalog | Where-Object { $_.Name -eq [string]$model.SelectedItem })
+            $hint.Text = if ($entry.Count) { 'Selected driver INF declares models for: ' + ($entry[0].Architectures -join ', ') + '. Windows still checks OS compatibility, binaries and signatures during installation.' }
+                else { 'Import a package and select a driver to see its declared x64/ARM64 model support.' }
+        }
         else { $hint.Text = 'IPP/IPPS work on x64 and ARM64 without a vendor driver package. Port 631 is automatic. IPPS requires a trusted certificate matching the hostname.' }
         $port.Enabled = $tcp -or $customPort.Checked; $model.Enabled = $tcp; $package.Enabled = $tcp; $import.Enabled = $tcp; $import.Visible = $tcp
     }.GetNewClosure())

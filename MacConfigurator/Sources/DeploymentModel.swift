@@ -313,7 +313,7 @@ final class DeploymentModel {
         guard matches(windowsRoot, "^\\\\\\\\[^\\\\]+\\\\[^\\\\]+"), !matches(windowsRoot, "[\"\\r\\n]") else { throw DeploymentError("Enter the final Windows UNC folder, such as \\\\fileserver\\Software\\Printers.") }
         if printers.contains(where: { $0["DriverPackages"] != nil }) { config["SchemaVersion"] = 2 }
         try Self.validate(config, root: root)
-        let files = ["PrinterDeployment.ps1", "Launch-Configurator.cmd", "README.md", "Modules/PrinterDeployment.Core.psm1", "Modules/PrinterDeployment.Clients.psm1", "Modules/PrinterDeployment.Deploy.psm1", "Modules/PrinterDeployment.Gui.psm1", "Templates/Install-PrinterDeploymentTask.ps1.template", "Templates/Report-UserPrinters.ps1.template"]
+        let files = ["PrinterDeployment.ps1", "Launch-Configurator.cmd", "README.md", "Modules/PrinterDeployment.Core.psm1", "Modules/PrinterDeployment.Clients.psm1", "Modules/PrinterDeployment.Deploy.psm1", "Modules/PrinterDeployment.Gui.psm1", "Modules/PrinterDeployment.Discovery.psm1", "Templates/Install-PrinterDeploymentTask.ps1.template", "Templates/Report-UserPrinters.ps1.template"]
         for file in files { _ = try Self.resource(root, file); guard FileManager.default.fileExists(atPath: source.appendingPathComponent(file).path) else { throw DeploymentError("Application bundle is missing \(file). Rebuild or download the full app.") } }
         // Preflight concurrent changes before publishing scripts; save performs the check again.
         if let url = configURL, FileManager.default.fileExists(atPath: url.path) {

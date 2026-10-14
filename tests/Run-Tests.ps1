@@ -4,6 +4,8 @@ Set-StrictMode -Version 2.0
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Import-Module (Join-Path $projectRoot 'Modules/PrinterDeployment.Core.psm1') -Force
 Import-Module (Join-Path $projectRoot 'Modules/PrinterDeployment.Clients.psm1') -Force
+Import-Module (Join-Path $projectRoot 'Modules/PrinterDeployment.Discovery.psm1') -Force
+. (Join-Path $PSScriptRoot 'DiscoveryFixtures.ps1')
 $script:Passed = 0
 function Assert-True { param($Condition, [string]$Message) if (-not $Condition) { throw $Message } }
 function Assert-Throws {
@@ -63,6 +65,40 @@ Model="Test Printer v4"
             [void][Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
             Assert-True (-not $errors) ("Syntax errors in $($file.Name): " + ($errors -join '; '))
         }
+    }
+    Test-Case 'Discovery combines DNS-SD records, deduplicates endpoints and keeps advertised IPP paths and ports' {
+        Initialize-PDDiscovery
+        $catalog=New-Object PrintDeployGPO.Discovery.Catalog
+        $packet=New-DiscoveryAdvertisement
+        $catalog.Add($packet); $catalog.Add($packet)
+        $compressed=New-DiscoveryPacket -Records (,(New-DiscoveryRecord '_ipp._tcp.local.' 12 ([byte[]]@(192,12))))
+        $parsed=[PrintDeployGPO.Discovery.DNS]::Parse($compressed)
+        Assert-True ($parsed.Count -eq 1 -and $parsed[0].Target -eq '_ipp._tcp.local.') 'Valid DNS name compression was rejected.'
+        $ipp=@($catalog.Printers())
+        Assert-True ($ipp.Count -eq 1 -and $ipp[0].Name -eq 'Test. Printer' -and $ipp[0].Address -eq '192.0.2.55' -and $ipp[0].Port -eq 631 -and $ipp[0].Subpath -eq '/ipp/print' -and $ipp[0].Location -eq 'Office') 'Advertised name, address or IPP details were lost.'
+        $catalog.Add((New-DiscoveryAdvertisement '_ipps._tcp.local.' 443 'printers/secure'))
+        $catalog.Add((New-DiscoveryAdvertisement '_pdl-datastream._tcp.local.' 9100))
+        $secure=@($catalog.Printers() | Where-Object { $_.Protocol -eq 'ipps' })[0]
+        Assert-True ($secure.Address -eq 'printer.local' -and $secure.Port -eq 443 -and @($catalog.Printers()).Count -eq 3) 'IPPS hostname or RAW endpoint detection failed.'
+        Assert-True (@($catalog.Questions() | Where-Object { $_ -like '33|Test\.*' }).Count -eq 3) 'Dots in service names were not preserved for follow-up DNS questions.'
+        $ordered=New-Object PrintDeployGPO.Discovery.Catalog
+        $records=[PrintDeployGPO.Discovery.DNS]::Parse($packet)
+        Assert-True ($records.Count -eq 4) 'DNS record parsing failed.'
+        $instance='Test\. Printer._ipp._tcp.local.'
+        $ordered.Add((New-DiscoveryPacket -Records (,(New-DiscoveryRecord $instance 33 ([byte[]]@(0,0,0,0,2,119)+(New-DiscoveryName 'printer.local.'))))))
+        Assert-True (@($ordered.Printers()).Count -eq 0) 'An unadvertised service was offered as a printer.'
+        $ordered.Add((New-DiscoveryPacket -Records (,(New-DiscoveryRecord '_ipp._tcp.local.' 12 (New-DiscoveryName $instance)))))
+        Assert-True (@($ordered.Printers()).Count -eq 1 -and $ordered.Printers()[0].Address -eq 'printer.local') 'Out-of-order records or hostname fallback failed.'
+    }
+    Test-Case 'Discovery rejects truncated packets, compression loops and unsafe advertised paths' {
+        $packet=New-DiscoveryAdvertisement
+        Assert-True ([PrintDeployGPO.Discovery.DNS]::Parse([byte[]]$packet[0..15]).Count -eq 0) 'Truncated packet accepted.'
+        [byte[]]$loop=@(0,0,132,0,0,0,0,1,0,0,0,0,192,12,0,12,0,1,0,0,0,120,0,2,192,12)
+        Assert-True ([PrintDeployGPO.Discovery.DNS]::Parse($loop).Count -eq 0) 'Compression loop accepted.'
+        $query=[PrintDeployGPO.Discovery.DNS]::Query('_ipp._tcp.local.',12)
+        Assert-True ([PrintDeployGPO.Discovery.DNS]::Parse($query).Count -eq 0) 'A DNS query was accepted as a printer response.'
+        $catalog=New-Object PrintDeployGPO.Discovery.Catalog; $catalog.Add((New-DiscoveryAdvertisement -Path 'ipp#fragment'))
+        Assert-True (@($catalog.Printers()).Count -eq 0) 'Unsafe IPP path was offered.'
     }
     Test-Case 'Entry point resolves default config beside the script from another working folder' {
         $fixture=Join-Path $tempRoot 'Entry point with spaces'; $fixtureModules=Join-Path $fixture 'Modules'
@@ -232,7 +268,7 @@ Model="Test Printer v4"
         $publishConfig = New-PDConfiguration; $publishConfig.Printers = @((New-TestPrinter))
         Publish-PDBundle $publishConfig $bundleRoot $projectRoot
         foreach ($relative in @('PrinterDeployment.ps1','Launch-Configurator.cmd','README.md','printers.json','GPO-Setup.txt','Install-PrinterDeploymentTask.ps1','Report-UserPrinters.ps1',
-            'Modules/PrinterDeployment.Core.psm1','Modules/PrinterDeployment.Deploy.psm1','Modules/PrinterDeployment.Gui.psm1','Modules/PrinterDeployment.Clients.psm1',
+            'Modules/PrinterDeployment.Core.psm1','Modules/PrinterDeployment.Deploy.psm1','Modules/PrinterDeployment.Gui.psm1','Modules/PrinterDeployment.Clients.psm1','Modules/PrinterDeployment.Discovery.psm1',
             'Templates/Install-PrinterDeploymentTask.ps1.template','Templates/Report-UserPrinters.ps1.template','Client Logs')) {
             Assert-True (Test-Path -LiteralPath (Join-Path $bundleRoot $relative)) "Bundle missing $relative"
         }

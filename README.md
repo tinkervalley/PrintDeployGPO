@@ -37,6 +37,7 @@ Printers\
     Install-PrinterDeploymentTask.ps1.template
     Report-UserPrinters.ps1.template
   Modules\
+    PrinterDeployment.Discovery.psm1
     PrinterDeployment.Core.psm1
     PrinterDeployment.Deploy.psm1
     PrinterDeployment.Gui.psm1
@@ -52,6 +53,16 @@ Printers\
 Package paths in JSON are relative to this folder. Validation rejects absolute resource paths, traversal, missing packages, symbolic links/junctions, unsupported drivers, duplicate queue names and cleanup names that conflict with configured printers. Cancelled imports may leave unreferenced package folders; these are not deployed. The tool does not delete unused packages automatically.
 
 The INF reader supports neutral/en-US string tables, quoted names, comments, continuations and manufacturer model sections for x64 and ARM64, including OS-decorated sections. Both GUIs show the selected model's architecture declarations. This describes INF model support, not proof that a package's binaries, OS version constraints or signatures will work on a particular client. The legacy JSON Architecture field is retained for compatibility but no longer filters driver names or limits deployment. The dropdown is a list of candidate model names; Windows still decides whether a model's OS decoration applies on a particular client. Localized-only or unusually structured vendor INFs may need a different vendor package. All packaged INFs must declare `Class=Printer`. Type 4 requires `ClassVer=4.0`; Type 3 accepts an absent `ClassVer` or `ClassVer=3.0` and rejects Type 4 packages. Select the corresponding type explicitly before importing. Changing a package target between Type 3 and Type 4 clears that target's package selection. Changing the printer connection type clears the shared package on a direct Type3/Type4 change; explicit architecture overrides retain their own types. Vendor EXE/MSI installers and co-installer workflows are not executed. Windows independently enforces package signatures and compatibility during installation.
+
+## Discover network printers
+
+In either printer editor, click **Discover…** next to the address field. The picker scans for advertised **IPP**, **IPPS** and **RAW TCP/IP** endpoints on the administrator's local network. Select a row and click **Use selected printer**. It fills the address/hostname, protocol, advertised port, IPP resource path and location; the advertised name fills an empty queue name. A printer advertising both IPP and IPPS may have a row for each endpoint so you can choose which to use.
+
+IPP/IPPS endpoints select the IPP connection type. RAW endpoints use Type4 by default and preserve Type3 if already selected. Discovery does not select or download a vendor driver: import the Type3/Type4 package and choose its model afterwards. Advertised model text helps identify the printer, but is not an INF driver name. IPPS keeps the advertised hostname for certificate matching; other endpoints prefer an advertised IPv4 address when available, otherwise their hostname. Review detected settings before saving.
+
+Discovery uses [Bonjour/DNS-SD service advertisements](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/NetServices/Articles/NetServicesArchitecture.html), including the `rp` TXT key for the IPP path. The Windows picker sends bounded [one-shot mDNS queries](https://www.rfc-editor.org/rfc/rfc6762.html#section-6.7) on active IPv4 multicast interfaces (about seven seconds); the Mac picker uses the built-in Bonjour browser (eight seconds). Both run in the configuration GUI only; clients deploy the saved endpoints without scanning. Neither picker installs printers.
+
+This discovers advertised services rather than sweeping every IP address. Printers on other VLANs, IPv6-only segments in the Windows picker, or networks blocking mDNS may not appear. Legacy devices without Bonjour/mDNS advertisements must be entered manually. Enable Bonjour/AirPrint on the printer where available and allow local-network access when macOS prompts. **Scan again** refreshes results; Cancel stops the scan. The scan does not change firewall rules or network settings.
 
 ## Separate packages on one printer
 

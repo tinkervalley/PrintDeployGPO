@@ -1,6 +1,7 @@
 Set-StrictMode -Version 2.0
 Import-Module (Join-Path $PSScriptRoot 'PrinterDeployment.Core.psm1')
 Import-Module (Join-Path $PSScriptRoot 'PrinterDeployment.Clients.psm1')
+Import-Module (Join-Path $PSScriptRoot 'PrinterDeployment.Discovery.psm1')
 
 function New-PDLabel {
     param([string]$Text)
@@ -103,6 +104,58 @@ User logs: %LOCALAPPDATA%\PrinterDeploymentTool\<DeploymentId>\
 "@
 }
 
+function New-PDDiscoveryForm {
+    param($Owner)
+    Initialize-PDDiscovery
+    $form=New-Object Windows.Forms.Form; $form.Text='Discover network printers'; $form.Size='1060,500'; $form.MinimumSize='850,420'; $form.StartPosition='CenterParent'; $form.Font=New-Object Drawing.Font('Segoe UI',10)
+    $layout=New-Object Windows.Forms.TableLayoutPanel; $layout.Dock='Fill'; $layout.Padding='12,12,12,12'; $layout.ColumnCount=1; $layout.RowCount=4
+    foreach ($style in @('AutoSize','Percent','AutoSize','AutoSize')) { [void]$layout.RowStyles.Add((New-Object Windows.Forms.RowStyle($style,100))) }
+    $form.Controls.Add($layout)
+    $hint=New-PDLabel 'Discovery searches the local network using Bonjour/mDNS. Other VLANs or printers without advertisements may need manual entry. Type3/Type4 drivers must still be selected manually.'; $hint.MaximumSize='1000,0'
+    $layout.Controls.Add($hint,0,0)
+    $grid=New-Object Windows.Forms.DataGridView; $grid.Name='DiscoveredPrinters'; $grid.Dock='Fill'; $grid.ReadOnly=$true; $grid.AllowUserToAddRows=$false; $grid.AllowUserToDeleteRows=$false; $grid.MultiSelect=$false; $grid.SelectionMode='FullRowSelect'; $grid.RowHeadersVisible=$false; $grid.AutoSizeColumnsMode='Fill'
+    foreach ($column in @('Name','Protocol','Address','Port','Subpath','Model')) { [void]$grid.Columns.Add($column,$column) }
+    $layout.Controls.Add($grid,0,1)
+    $status=New-PDLabel 'Select Scan to search for advertised printers.'; $status.MaximumSize='1000,0'; $layout.Controls.Add($status,0,2)
+    $buttons=New-Object Windows.Forms.FlowLayoutPanel; $buttons.AutoSize=$true; $layout.Controls.Add($buttons,0,3)
+    $data=@{ Scanner=$null; Result=$null }; $form.Tag=$data
+    $timer=New-Object Windows.Forms.Timer; $timer.Interval=100
+    $scan=New-PDButton 'Scan again' $null
+    $start={
+        if ($data.Scanner) { $data.Scanner.Dispose() }
+        $grid.Rows.Clear(); $scan.Enabled=$false; $status.Text='Searching the local network for advertised IPP, IPPS and RAW printers...'
+        $data.Scanner=New-Object PrintDeployGPO.Discovery.Scan; $timer.Start()
+    }.GetNewClosure()
+    $timer.Add_Tick({
+        if (-not $data.Scanner -or -not $data.Scanner.Work.IsCompleted) { return }
+        $timer.Stop(); $scan.Enabled=$true
+        try {
+            $printers=$data.Scanner.Work.GetAwaiter().GetResult()
+            foreach ($printer in $printers) { $index=$grid.Rows.Add([object[]]@($printer.Name,$printer.Protocol.ToUpperInvariant(),$printer.Address,$printer.Port,$(if ($printer.Protocol -ne 'raw') { $printer.Subpath } else { '' }),$printer.Model)); $grid.Rows[$index].Tag=$printer }
+            $grid.ClearSelection()
+            $status.Text=if ($grid.Rows.Count) { "$($grid.Rows.Count) advertised endpoints found. Select one to fill the editor." } else { 'No advertised printers found. Check Bonjour/mDNS, firewalls and network isolation, or enter the printer manually.' }
+        } catch { $status.Text='Discovery failed: ' + $_.Exception.Message }
+        finally { $data.Scanner.Dispose(); $data.Scanner=$null }
+    }.GetNewClosure())
+    $scan.Add_Click($start)
+    $use=New-PDButton 'Use selected printer' ({
+        if (-not $grid.SelectedRows.Count) { $status.Text='Select a detected printer first.'; return }
+        $data.Result=$grid.SelectedRows[0].Tag; $form.DialogResult='OK'; $form.Close()
+    }.GetNewClosure())
+    $cancel=New-PDButton 'Cancel' $null; $cancel.DialogResult='Cancel'
+    $buttons.Controls.AddRange(@($scan,$use,$cancel)); $form.AcceptButton=$use; $form.CancelButton=$cancel
+    $form.Add_Shown($start)
+    $form.Add_FormClosed({ $timer.Stop(); $timer.Dispose(); if ($data.Scanner) { $data.Scanner.Dispose(); $data.Scanner=$null } }.GetNewClosure())
+    $form.Add_Disposed({ if ($data.Scanner) { $data.Scanner.Dispose(); $data.Scanner=$null }; $timer.Dispose() }.GetNewClosure())
+    return $form
+}
+
+function Show-PDDiscovery {
+    param($Owner)
+    $form=New-PDDiscoveryForm -Owner $Owner
+    try { if ($form.ShowDialog($Owner) -eq 'OK') { $form.Tag.Result } } finally { $form.Dispose() }
+}
+
 function New-PDPrinterEditorForm {
     param($Printer, [string]$Root, [string]$Architecture, $Owner)
     $dialog = New-Object Windows.Forms.Form
@@ -118,6 +171,8 @@ function New-PDPrinterEditorForm {
     $name = New-Object Windows.Forms.TextBox; $name.Name = 'PrinterName'
     $kind = New-Object Windows.Forms.ComboBox; $kind.Name = 'ConnectionKind'; $kind.DropDownStyle = 'DropDownList'; $kind.Items.AddRange(@('IPP','Type4','Type3'))
     $address = New-Object Windows.Forms.TextBox; $address.Name = 'PrinterHost'
+    $discover=New-PDButton 'Discover...' $null; $discover.Name='DiscoverPrinters'
+    $addressPanel=New-Object Windows.Forms.TableLayoutPanel; $addressPanel.AutoSize=$true; $addressPanel.ColumnCount=2; [void]$addressPanel.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('Percent',100))); [void]$addressPanel.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle('AutoSize'))); $address.Dock='Fill'; $addressPanel.Controls.Add($address,0,0); $addressPanel.Controls.Add($discover,1,0)
     $protocol = New-Object Windows.Forms.ComboBox; $protocol.Name = 'IppProtocol'; $protocol.DropDownStyle = 'DropDownList'; $protocol.Items.AddRange(@('ipp','ipps')); $protocol.SelectedIndex = 0
     $subpath = New-Object Windows.Forms.TextBox; $subpath.Name = 'IppSubpath'; $subpath.Text = '/ipp'
     $port = New-Object Windows.Forms.NumericUpDown; $port.Name = 'PrinterPort'; $port.Minimum = 1; $port.Maximum = 65535; $port.Value = 631
@@ -134,7 +189,7 @@ function New-PDPrinterEditorForm {
     $hint = New-Object Windows.Forms.Label; $hint.Name = 'DriverSupport'; $hint.AutoSize = $true; $hint.MaximumSize = '590,0'
     $hint.Text = 'Enter an IP address or hostname. IPP/IPPS use port 631 automatically; enable a custom port if needed (for example 443). IPPS requires a trusted certificate matching the hostname.'
     $labels = @('Printer name', 'Connection type', 'IP address / hostname', 'IPP protocol', 'IPP subpath', 'Port', 'Location', 'Comment', 'Packaged INF', 'Detected driver name')
-    $controls = @($name, $kind, $address, $protocol, $subpath, $portPanel, $location, $comment, $packagePanel, $model)
+    $controls = @($name, $kind, $addressPanel, $protocol, $subpath, $portPanel, $location, $comment, $packagePanel, $model)
     $fieldLabels = @()
     for ($i = 0; $i -lt $controls.Count; $i++) {
         $fieldLabel = New-PDLabel $labels[$i]; $fieldLabels += $fieldLabel
@@ -146,6 +201,21 @@ function New-PDPrinterEditorForm {
     $layout.Controls.Add($buttons, 1, 11)
     # Mutable dialog data is captured by event-handler closures.
     $data = @{ PackagePath = ''; InfPath = ''; Result = $null; OriginalAddress = ''; OriginalParts = $null; TcpPort = 9100; IppPort = 631; PreviousKind = ''; DriverCatalog = @(); Slots=@{}; Target='Shared/default'; LoadingSlot=$false }
+    $applyDiscovery={
+        param($printer)
+        if ([string]::IsNullOrWhiteSpace($name.Text)) { $name.Text=$printer.Name }
+        if ([string]::IsNullOrWhiteSpace($location.Text)) { $location.Text=$printer.Location }
+        $address.Text=$printer.Address
+        if ($printer.Protocol -in @('ipp','ipps')) {
+            $kind.SelectedItem='IPP'; $protocol.SelectedItem=$printer.Protocol; $subpath.Text=$printer.Subpath
+            $customPort.Checked=$printer.Port -ne (Get-PDIppDefaultPort $printer.Protocol); $port.Value=$printer.Port; $data.IppPort=$printer.Port
+        } else {
+            if ($kind.SelectedItem -ne 'Type3') { $kind.SelectedItem='Type4' }
+            $port.Value=$printer.Port; $data.TcpPort=$printer.Port
+        }
+    }.GetNewClosure()
+    $data.ApplyDiscovery=$applyDiscovery
+    $discover.Add_Click({ try { $printer=Show-PDDiscovery -Owner $dialog; if ($printer) { & $applyDiscovery $printer } } catch { Show-PDError $_ } }.GetNewClosure())
     $storeSlot = {
         if ($data.LoadingSlot) { return }
         $value = if ($data.Slots.ContainsKey($data.Target)) { $data.Slots[$data.Target] } else { [pscustomobject]@{ Kind='Type4'; PackagePath=''; InfPath=''; DriverName='' } }
@@ -309,7 +379,7 @@ function Publish-PDBundle {
     param($Config, [string]$Root, [string]$SourceRoot)
     Assert-PDConfiguration $Config $Root
     foreach ($relative in @('PrinterDeployment.ps1','Launch-Configurator.cmd','README.md','printers.json','GPO-Setup.txt','Install-PrinterDeploymentTask.ps1','Report-UserPrinters.ps1',
-        'Modules\PrinterDeployment.Core.psm1','Modules\PrinterDeployment.Deploy.psm1','Modules\PrinterDeployment.Gui.psm1','Modules\PrinterDeployment.Clients.psm1',
+        'Modules\PrinterDeployment.Core.psm1','Modules\PrinterDeployment.Deploy.psm1','Modules\PrinterDeployment.Gui.psm1','Modules\PrinterDeployment.Clients.psm1','Modules\PrinterDeployment.Discovery.psm1',
         'Templates\Install-PrinterDeploymentTask.ps1.template','Templates\Report-UserPrinters.ps1.template','Client Logs')) {
         [void](Resolve-PDResource $Root $relative)
     }

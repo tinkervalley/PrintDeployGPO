@@ -11,6 +11,7 @@ for task_arch in arm64 x86_64; do
     "$task_source_root/MacConfigurator/Sources/DeploymentModel.swift" \
     "$task_source_root/MacConfigurator/Sources/INFModels.swift" \
     "$task_source_root/MacConfigurator/Sources/ConfiguratorApp.swift" \
+    "$task_source_root/MacConfigurator/Sources/PrinterDiscovery.swift" \
     "$task_source_root/MacConfigurator/Sources/MacSmoke.swift" \
     -o "$task_output_dir/PrintDeployGPO-$task_arch"
 done

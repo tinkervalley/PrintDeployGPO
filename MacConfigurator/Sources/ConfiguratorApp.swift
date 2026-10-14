@@ -93,7 +93,7 @@ final class PrinterEditor: NSObject, NSWindowDelegate {
         hint.textColor = .secondaryLabelColor
         let save = ActionButton("Save printer") { [weak self] in self?.save() }; save.keyEquivalent = "\r"
         let cancel = ActionButton("Cancel") { [weak self] in NSApp.stopModal(withCode: .cancel); self?.dialog.orderOut(nil) }; cancel.keyEquivalent = "\u{1b}"
-        let body = stack([row("Printer name", name), row("Connection", kind), row("IP / hostname", host), protocolRow, pathRow, row("Port", portField), row("Location", location), row("Comment", comment), packageRow, driverRow, hint, stack([cancel, save])], vertical: true)
+        let body = stack([row("Printer name", name), row("Connection", kind), row("IP / hostname", stack([host, ActionButton("Discover…") { [weak self] in self?.discover() }])), protocolRow, pathRow, row("Port", portField), row("Location", location), row("Comment", comment), packageRow, driverRow, hint, stack([cancel, save])], vertical: true)
         body.spacing = 14; fill(body, in: dialog.contentView!, inset: 22)
         for view in body.arrangedSubviews.dropLast() { view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
         name.stringValue = text(original, "Name"); host.stringValue = text(original, "Address"); location.stringValue = text(original, "Location"); comment.stringValue = text(original, "Comment")
@@ -150,6 +150,20 @@ final class PrinterEditor: NSObject, NSWindowDelegate {
         let selected = catalog.first { same($0.name, driver.titleOfSelectedItem ?? "") }
         support.stringValue = selected.map { "INF models: " + $0.architectures.joined(separator: ", ") + ". Windows checks OS compatibility, binaries and signatures at installation." } ?? "Import a package and select a driver to see its architecture declarations."
         support.textColor = .secondaryLabelColor
+    }
+    func discover() { if let printer = PrinterDiscoveryDialog().run() { applyDiscovery(printer) } }
+    func applyDiscovery(_ printer: DiscoveredPrinter) {
+        if name.stringValue.trimmingCharacters(in: .whitespaces).isEmpty { name.stringValue = printer.name }
+        if location.stringValue.trimmingCharacters(in: .whitespaces).isEmpty { location.stringValue = printer.location }
+        host.stringValue = printer.address
+        if printer.protocolName != "raw" {
+            kind.selectItem(withTitle: "IPP"); kindChanged(); scheme.selectItem(withTitle: printer.protocolName)
+            path.stringValue = printer.path; customPort.state = printer.port == IppEndpoint.defaultPort(printer.protocolName) ? .off : .on
+            port.stringValue = String(printer.port); ippPort = port.stringValue; protocolChanged()
+        } else {
+            if kind.titleOfSelectedItem != "Type3" { kind.selectItem(withTitle: "Type4") }; kindChanged()
+            port.stringValue = String(printer.port); tcpPort = port.stringValue
+        }
     }
     func importDriver() {
         let folder = NSOpenPanel(); folder.canChooseDirectories = true; folder.canChooseFiles = false; folder.prompt = "Choose package"; folder.message = "Choose the complete extracted vendor driver folder."

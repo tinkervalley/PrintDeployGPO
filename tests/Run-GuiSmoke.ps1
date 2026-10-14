@@ -8,6 +8,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Import-Module (Join-Path $projectRoot 'Modules\PrinterDeployment.Gui.psm1') -Force
+. (Join-Path $PSScriptRoot 'DiscoveryFixtures.ps1')
 function Assert-Gui {
     param($Condition, [string]$Message)
     if (-not $Condition) { throw $Message }
@@ -57,6 +58,22 @@ try {
     $kind.SelectedItem='IPP'
     Assert-Gui (-not $port.Enabled -and $port.Value -eq 631) 'Switching back to IPP changed its default port.'
     Write-Host 'PASS Printer editor constructs and switches between IPP and Type 4.'
+
+    $discovery=New-PDDiscoveryForm -Owner $form; $forms.Add($discovery)
+    $discoveryFields=@(Get-GuiChildren $discovery)
+    Assert-Gui (@($discoveryFields | Where-Object { $_.Name -eq 'DiscoveredPrinters' }).Count -eq 1 -and $null -eq $discovery.Tag.Scanner) 'Discovery dialog did not construct without scanning.'
+    $catalog=New-Object PrintDeployGPO.Discovery.Catalog; $catalog.Add((New-DiscoveryAdvertisement '_ipps._tcp.local.' 443 'ipp/print'))
+    $detected=$catalog.Printers()[0]
+    $discoveryGrid=($discoveryFields | Where-Object { $_.Name -eq 'DiscoveredPrinters' })
+    $row=$discoveryGrid.Rows.Add([object[]]@($detected.Name,'IPPS',$detected.Address,$detected.Port,$detected.Subpath,$detected.Model)); $discoveryGrid.Rows[$row].Tag=$detected; $discoveryGrid.Rows[$row].Selected=$true
+    Invoke-GuiButton ($discoveryFields | Where-Object { $_ -is [System.Windows.Forms.Button] -and $_.Text -eq 'Use selected printer' })
+    Assert-Gui ($discovery.Tag.Result.Address -eq $detected.Address -and $discovery.Tag.Result.Port -eq 443) 'Discovery picker lost the selected endpoint.'
+    & $editor.Tag.ApplyDiscovery $detected
+    Assert-Gui (($editorChildren | Where-Object { $_.Name -eq 'PrinterHost' }).Text -eq 'printer.local' -and ($editorChildren | Where-Object { $_.Name -eq 'IppProtocol' }).SelectedItem -eq 'ipps' -and ($editorChildren | Where-Object { $_.Name -eq 'IppSubpath' }).Text -eq '/ipp/print' -and $port.Value -eq 443 -and $port.Enabled) 'Discovery did not fill advertised IPPS host, path and custom port.'
+    $catalog=New-Object PrintDeployGPO.Discovery.Catalog; $catalog.Add((New-DiscoveryAdvertisement '_pdl-datastream._tcp.local.' 9101))
+    & $editor.Tag.ApplyDiscovery ($catalog.Printers()[0])
+    Assert-Gui ($kind.SelectedItem -eq 'Type4' -and $port.Value -eq 9101 -and ($editorChildren | Where-Object { $_.Name -eq 'PrinterName' }).Text -eq 'Test. Printer') 'RAW discovery failed or changed the chosen queue name.'
+    Write-Host 'PASS Discovery controls apply advertised IPPS and RAW endpoints without scanning or installing printers.'
 
     $newEditor=New-PDPrinterEditorForm -Root $tempRoot -Architecture x64 -Owner $form; $forms.Add($newEditor)
     $fields=@(Get-GuiChildren $newEditor)
@@ -147,7 +164,7 @@ Vendor=Models,NTamd64,NTarm64
     $grids = @(Get-GuiChildren $loaded[0] | Where-Object { $_ -is [System.Windows.Forms.DataGridView] })
     Assert-Gui (@($grids | Where-Object { $_.Columns.Contains('Address') -and $_.Rows.Count -eq 1 }).Count -eq 1) 'Saved printer did not populate the main GUI.'
     Write-Host 'PASS Existing configuration populates the printer grid.'
-    Write-Host 'All 9 Windows PowerShell GUI smoke checks passed.'
+    Write-Host 'All 10 Windows PowerShell GUI smoke checks passed.'
 } finally {
     foreach ($form in $forms) { $form.Dispose() }
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue

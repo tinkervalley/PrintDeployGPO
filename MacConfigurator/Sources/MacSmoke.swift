@@ -17,6 +17,19 @@ enum MacSmoke {
         var custom = printer; custom["Address"] = "ipps://PRINTER.example.com:443/ipp/print"; custom["UnknownField"] = "Keep"
         let existing = PrinterEditor(model: model, printer: custom)
         guard text(try existing.makePrinter(), "Address") == text(custom, "Address"), text(try existing.makePrinter(), "UnknownField") == "Keep" else { throw DeploymentError("Mac editor rewrote unchanged endpoint or unknown fields.") }
+        let txt: [String: Data] = ["rp": Data("ipp/print".utf8), "ty": Data("Test model".utf8), "note": Data("Office".utf8)]
+        guard let discovered = DiscoveredPrinter.make(name: "Found printer", host: "printer.local.", ipv4: "192.0.2.55", type: "_ipps._tcp.", port: 443, txt: txt), discovered.address == "printer.local", discovered.path == "/ipp/print", discovered.model == "Test model" else { throw DeploymentError("Discovery lost advertised IPPS host or TXT details.") }
+        editor.applyDiscovery(discovered)
+        guard text(try editor.makePrinter(), "Address") == "ipps://printer.local:443/ipp/print", editor.name.stringValue == "Office", editor.customPort.state == .on, editor.port.isEnabled else { throw DeploymentError("Discovered IPPS endpoint did not fill the editor or overwrote the queue name.") }
+        guard let raw = DiscoveredPrinter.make(name: "RAW printer", host: "printer.local.", ipv4: "192.0.2.55", type: "_pdl-datastream._tcp.", port: 9101, txt: [:]) else { throw DeploymentError("RAW discovery failed.") }
+        editor.kind.selectItem(withTitle: "Type3"); editor.kindChanged(); editor.applyDiscovery(raw)
+        guard editor.kind.titleOfSelectedItem == "Type3", editor.host.stringValue == "192.0.2.55", editor.port.stringValue == "9101" else { throw DeploymentError("RAW discovery lost the driver's type or advertised port.") }
+        guard DiscoveredPrinter.make(name: "Bad", host: "printer.local", type: "_ipp._tcp.", port: 631, txt: ["rp": Data("ipp#fragment".utf8)]) == nil else { throw DeploymentError("Unsafe discovered path accepted.") }
+        let discovery = PrinterDiscoveryDialog(); discovery.replace([discovered, raw], status: "Synthetic endpoints")
+        discovery.table.table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false); discovery.select()
+        guard discovery.result?.key == discovered.key, discovery.table.rows.count == 2 else { throw DeploymentError("Discovery picker returned the wrong endpoint.") }
+        discovery.window.close()
+        editor.kind.selectItem(withTitle: "IPP"); editor.kindChanged()
         model.printers = [printer]; try model.save()
         let source = Bundle.main.resourceURL?.appendingPathComponent("WindowsBundle") ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let controller = ConfiguratorController(source: source); try controller.model.open(root.appendingPathComponent("printers.json")); controller.loadControls()

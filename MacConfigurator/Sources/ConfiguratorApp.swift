@@ -101,7 +101,7 @@ final class PrinterEditor: NSObject, NSWindowDelegate {
         driver.target = self; driver.action = #selector(driverChanged)
         kindChanged()
         if !infPath.isEmpty, text(original, "Kind") != "IPP", let root = model.root {
-            do { catalog = try INFModels.catalog(DeploymentModel.resource(root, infPath), type: kind.titleOfSelectedItem == "Type3" ? 3 : 4); driver.addItems(withTitles: catalog.map { $0.name }); driver.selectItem(withTitle: text(original, "DriverName")); packageLabel.stringValue = infPath; driverChanged() }
+            do { catalog = try INFModels.catalog(DeploymentModel.resource(root, infPath), type: kind.titleOfSelectedItem == "Type3" ? 3 : 4); driver.addItems(withTitles: catalog.map { $0.name }); if let selected = catalog.first(where: { same($0.name, text(original, "DriverName")) }) { driver.selectItem(withTitle: selected.name); packageLabel.stringValue = infPath } else { driver.selectItem(at: -1); packageLabel.stringValue = "Saved driver name is not present in this INF. Select a valid model." }; driverChanged() }
             catch { packageLabel.stringValue = "Package needs attention: \(error.localizedDescription)" }
         }
     }

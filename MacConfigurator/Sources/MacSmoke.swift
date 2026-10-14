@@ -41,7 +41,7 @@ enum MacSmoke {
         let vendor = root.appendingPathComponent("Drivers/test"); try FileManager.default.createDirectory(at: vendor, withIntermediateDirectories: true)
         let inf = "[Version]\nClass=Printer\nClassVer=4.0\n[Manufacturer]\nVendor=Models,NTamd64,NTarm64\n[Models.NTamd64]\n\"Shared\"=Install,ID\n[Models.NTarm64]\n\"Shared\"=Install,ID\n\"ARM-only\"=Install,ARMID\n"
         try Data(inf.utf8).write(to: vendor.appendingPathComponent("printer.inf"))
-        let driverPrinter: JSON = ["Name": "ARM queue", "Kind": "Type4", "Address": "192.0.2.59", "PortNumber": 9100, "Location": "", "Comment": "", "PackagePath": "Drivers\\test", "InfPath": "Drivers\\test\\printer.inf", "DriverName": "ARM-only"]
+        let driverPrinter: JSON = ["Name": "ARM queue", "Kind": "Type4", "Address": "192.0.2.59", "PortNumber": 9100, "Location": "", "Comment": "", "PackagePath": "Drivers\\test", "InfPath": "Drivers\\test\\printer.inf", "DriverName": "arm-ONLY"]
         let driverEditor = PrinterEditor(model: model, printer: driverPrinter)
         guard driverEditor.driver.itemTitles.count == 2, driverEditor.support.stringValue.contains("ARM64"), !driverEditor.support.stringValue.contains("x64,") else { throw DeploymentError("Native ARM-only driver label failed.") }
         driverEditor.driver.selectItem(withTitle: "Shared"); driverEditor.driverChanged()

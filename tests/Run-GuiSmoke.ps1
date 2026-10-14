@@ -107,7 +107,7 @@ Vendor=Models,NTamd64,NTarm64
 "Shared model"=Install,ID
 "ARM-only model"=Install,ARMID
 '@ | Set-Content (Join-Path $driverFolder 'printer.inf') -Encoding Unicode
-    $driverPrinter=[pscustomobject]@{ Name='ARM queue'; Kind='Type4'; Address='192.0.2.59'; PortNumber=9100; Location=''; Comment=''; PackagePath='Drivers\test'; InfPath='Drivers\test\printer.inf'; DriverName='ARM-only model' }
+    $driverPrinter=[pscustomobject]@{ Name='ARM queue'; Kind='Type4'; Address='192.0.2.59'; PortNumber=9100; Location=''; Comment=''; PackagePath='Drivers\test'; InfPath='Drivers\test\printer.inf'; DriverName='arm-ONLY MODEL' }
     $driverEditor=New-PDPrinterEditorForm -Printer $driverPrinter -Root $tempRoot -Owner $form; $forms.Add($driverEditor)
     $fields=@(Get-GuiChildren $driverEditor); $driverControl=($fields | Where-Object { $_.Name -eq 'DriverModel' }); $support=($fields | Where-Object { $_.Name -eq 'DriverSupport' })
     Assert-Gui ($driverControl.Items.Contains('Shared model') -and $driverControl.Items.Contains('ARM-only model') -and $support.Text -match 'ARM64' -and $support.Text -notmatch 'x64,') 'ARM-only driver support was not displayed.'

@@ -241,7 +241,9 @@ function New-PDPrinterEditorForm {
             try {
                 $data.DriverCatalog = @(Get-PDInfDriverCatalog (Resolve-PDResource $Root $Printer.InfPath) -DriverType ([int]$Printer.Kind.Substring(4)))
                 $models = @($data.DriverCatalog | ForEach-Object { $_.Name })
-                $model.Items.AddRange([object[]]$models); $model.SelectedItem = $Printer.DriverName
+                $model.Items.AddRange([object[]]$models)
+                $selected=@($data.DriverCatalog | Where-Object { $_.Name -eq $Printer.DriverName })
+                if ($selected.Count) { $model.SelectedItem = $selected[0].Name }
             } catch { Show-PDError $_ }
         }
     }

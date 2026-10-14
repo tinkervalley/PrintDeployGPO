@@ -13,3 +13,7 @@ StartupProfileData-*
 # Local diagnostics and temporary files
 *.log
 *.tmp
+
+# Native Mac build outputs
+/MacConfigurator/build/
+/MacConfigurator/dist/

@@ -249,6 +249,23 @@ function Assert-PDConfiguration {
     }
 }
 
+function Get-PDNativeArchitecture {
+    if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') { return 'ARM64' }
+    'x64'
+}
+
+function Test-PDPrinterArchitecture {
+    param($Printer, [string]$Root, [ValidateSet('x64','ARM64')][string]$Architecture)
+    if ($Printer.Kind -eq 'IPP') { return $true }
+    try {
+        $models = @(Get-PDInfModels (Resolve-PDResource $Root $Printer.InfPath) $Architecture -DriverType ([int]$Printer.Kind.Substring(4)))
+        return $Printer.DriverName -in $models
+    } catch {
+        if ($_.Exception.Message.StartsWith("No $Architecture driver names found")) { return $false }
+        throw
+    }
+}
+
 function Get-PDHash {
     param([string]$Value)
     $sha = [Security.Cryptography.SHA256]::Create()

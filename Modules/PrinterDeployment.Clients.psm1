@@ -61,7 +61,7 @@ function Set-PDClientRemovalSelection {
 function New-PDClientReport {
     param($Config, $Identity, [object[]]$Before = @(), [object[]]$After = @(), [object[]]$RemovalResults = @(),
         [string]$Result, [string]$ErrorMessage = '', [string]$InventoryError = '', [string]$StartedAt,
-        [hashtable]$Records = @{}, [string]$RunId = ([guid]::NewGuid().ToString()))
+        [hashtable]$Records = @{}, [string]$RunId = ([guid]::NewGuid().ToString()), [string[]]$UnsupportedPrinters = @())
     $wanted = @($Config.Printers | ForEach-Object { $_.Name })
     $printers = @($After | ForEach-Object {
         [pscustomobject]@{ Name=[string]$_.Name; Type=[string]$_.Type; DriverName=[string]$_.DriverName; PortName=[string]$_.PortName
@@ -72,7 +72,8 @@ function New-PDClientReport {
         $verification = @($Config.Printers | ForEach-Object {
             $p = $_; $actual = @($After | Where-Object { $_.Name -eq $p.Name })
             $status = 'Missing'
-            if ($InventoryError) { $status = 'Unknown' }
+            if ($p.Name -in $UnsupportedPrinters) { $status = 'Unsupported architecture' }
+            elseif ($InventoryError) { $status = 'Unknown' }
             elseif ($actual.Count -eq 1) {
                 $driver = if ($p.Kind -eq 'IPP') { 'Microsoft IPP Class Driver' } else { $p.DriverName }
                 $status = 'Needs reconciliation'
@@ -82,7 +83,7 @@ function New-PDClientReport {
             }
             [pscustomobject]@{ Name=$p.Name; Status=$status }
         })
-        if ($Result -eq 'Success' -and @($verification | Where-Object { $_.Status -ne 'Installed' }).Count) {
+        if ($Result -eq 'Success' -and @($verification | Where-Object { $_.Status -notin @('Installed','Unsupported architecture') }).Count) {
             $Result = 'Failed'
             if (-not $ErrorMessage) { $ErrorMessage = 'One or more desired printers failed final inventory verification.' }
         }
@@ -138,7 +139,7 @@ function Get-PDClientReports {
                 foreach ($field in @('Name','Type','DriverName','PortName','Location')) { if ($p.$field -isnot [string]) { throw 'Invalid printer inventory.' } }
             }
             foreach ($p in $report.ConfiguredPrinters) {
-                if ($p.Name -isnot [string] -or $p.Status -notin @('Installed','Missing','Unknown','Needs reconciliation')) { throw 'Invalid configured-printer result.' }
+                if ($p.Name -isnot [string] -or $p.Status -notin @('Installed','Missing','Unknown','Needs reconciliation','Unsupported architecture')) { throw 'Invalid configured-printer result.' }
             }
             foreach ($result in $report.RemovalResults) {
                 $id=[guid]::Empty

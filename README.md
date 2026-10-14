@@ -1,6 +1,6 @@
 # PrintDeployGPO
 
-A Windows PowerShell 5.1 tool with a Windows Forms configuration GUI and a silent, repeatable GPO deployment mode. It installs machine-wide queues for all users, without a print server. Supports driverless IPP/IPPS and signed Type 3/Type 4 TCP/IP driver packages. There are no external PowerShell module dependencies beyond the Windows inbox PrintManagement and DISM modules.
+A printer deployment tool with native Windows and Mac configuration GUIs and a Windows PowerShell 5.1 deployment engine for silent, repeatable GPO deployment. It installs machine-wide queues for all users, without a print server. Supports driverless IPP/IPPS and signed Type 3/Type 4 TCP/IP driver packages. There are no external PowerShell module dependencies beyond the Windows inbox PrintManagement and DISM modules.
 
 ## Configure
 
@@ -11,7 +11,7 @@ A Windows PowerShell 5.1 tool with a Windows Forms configuration GUI and a silen
    ```
 
 2. Choose a deployment folder, ideally a dedicated UNC path such as `\\fileserver\Software\Printers`. A local folder is allowed for staging. Use a UNC path when creating the GPO; mapped drives are unavailable to SYSTEM.
-3. Choose the target architecture, x64 or ARM64. Use a separate configuration/share subfolder for each architecture. Run the native 64-bit PowerShell host on clients.
+3. Choose the **Driver model list**, x64 or ARM64, for browsing/validating packaged driver names. One deployment folder can serve x64 and ARM64 clients: IPP printers are architecture-independent. At deployment, each packaged INF is checked for the exact selected driver name in the client's native architecture. Incompatible selections are skipped and reported as **Unsupported architecture**; they do not block compatible queues or cause stale cleanup of those configured printers. Type 3 and Type 4 drivers both require native-compatible packages; driverless IPP is the shared path. Use a separate deployment only if that same printer needs different packages/model names on each architecture. Run 64-bit PowerShell on clients.
 4. Add an **IPP** printer by entering only its IP address or hostname, choosing **ipp** or **ipps**, and entering its subpath (default `/ipp`). The GUI builds the full URL and uses port **631** automatically for either protocol. Enable **Use custom port** for a printer advertising a different port, such as IPPS on 443. A leading slash is added to the subpath if omitted. IPv6 addresses work with or without brackets. Existing saved URLs, including custom ports and HTTP(S) schemes, are preserved when editing without endpoint changes. IPPS requires a trusted certificate matching the hostname. The correct resource path is printer-specific.
 5. For a **Type3** or **Type4** printer, enter its IP address/hostname and RAW TCP port (usually 9100). Choose **Import driver package**, select the complete extracted vendor package folder, then an INF inside that folder. The tool copies the entire folder into `Drivers\<unique-id>`, preserving manifests, catalogs, binaries and subfolders. Choose the exact detected driver name from the dropdown. EXE/MSI/ZIP packages must be extracted first.
 6. Configure cleanup if needed, validate, then **Save deployment bundle**. This exports `Install-PrinterDeploymentTask.ps1` for Computer Startup (one SYSTEM task) and `Report-UserPrinters.ps1` for User Logon (no additional task). Both accept blank GPO parameters. Deploy the user logon script to collect old shared-printer connections and apply selected user removals. The GPO deployment tab explains how to install it. Save writes the configuration last, after copying the scripts and resources.
@@ -33,6 +33,9 @@ Printers\
   printers.json
   GPO-Setup.txt
   README.md
+  Templates\
+    Install-PrinterDeploymentTask.ps1.template
+    Report-UserPrinters.ps1.template
   Modules\
     PrinterDeployment.Core.psm1
     PrinterDeployment.Deploy.psm1
@@ -49,6 +52,26 @@ Printers\
 Package paths in JSON are relative to this folder. Validation rejects absolute resource paths, traversal, missing packages, symbolic links/junctions, unsupported drivers, duplicate queue names and cleanup names that conflict with configured printers. Cancelled imports may leave unreferenced package folders; these are not deployed. The tool does not delete unused packages automatically.
 
 The INF reader supports neutral/en-US string tables, quoted names, comments, continuations and manufacturer model sections for the selected architecture, including OS-decorated sections. The dropdown is a list of candidate model names; Windows still decides whether a model's OS decoration applies on a particular client. Localized-only or unusually structured vendor INFs may need a different vendor package. All packaged INFs must declare `Class=Printer`. Type 4 requires `ClassVer=4.0`; Type 3 accepts an absent `ClassVer` or `ClassVer=3.0` and rejects Type 4 packages. Select the corresponding type explicitly before importing. Changing between Type 3 and Type 4 clears the package selection so the wrong package cannot be reused. Vendor EXE/MSI installers and co-installer workflows are not executed. Windows independently enforces package signatures and compatibility during installation.
+
+## Mac configurator
+
+The native **PrintDeployGPO.app** supports macOS 13 or later on Apple Silicon and Intel. It opens and edits the same `printers.json` used by Windows, preserves `DeploymentId` and unknown JSON fields, reads the same Client Logs snapshots, and writes the same scoped one-shot removal requests. It does not install printers on the Mac.
+
+1. Mount your Windows share in Finder using **Go > Connect to Server**, for example `smb://fileserver/Software`. Open the deployment's `printers.json` from that mounted share in the Mac app.
+2. Add/edit IPP printers or import complete Type 3/Type 4 packages and select detected INF driver names. **Driver models** chooses the architecture for browsing names; IPP deploys to both architectures and incompatible packaged drivers are skipped on clients.
+3. Use **Computers** to review combined computer/user inventories and schedule removals. The existing SYSTEM task and user logon script still collect reports and apply changes on Windows.
+4. **Save JSON** updates the opened configuration without copying scripts. **Save deployment bundle** also copies the Windows engine and exports both GPO scripts from the same templates used by the Windows GUI. For bundle export, open or create the canonical `printers.json` in the final folder and enter its **Windows UNC folder**, such as `\\fileserver\Software\Printers`. The Mac-mounted `/Volumes/...` path is used for local access only and never embedded in the GPO scripts. The UNC mapping is saved in this Mac's app preferences.
+5. Configure SMB and NTFS permissions from Windows. The Mac app can create Client Logs but cannot apply the Windows public-report ACL. Use **Set public log access** in the Windows GUI or apply the documented server permissions yourself. Sign generated scripts if required by your organization.
+
+Only one administrator should edit a deployment at a time. The Mac app checks the exact on-disk configuration before saving and refuses to overwrite concurrent edits; reopen the file and reapply your changes. Save checks resources and writes JSON atomically. JSON copies with another filename can be edited using Save JSON; bundle exports require `printers.json`. The Mac report view labels snapshots older than the configuration file's modification time, rather than trying to reproduce PowerShell's JSON revision hash.
+
+To build locally, install Xcode Command Line Tools (or Xcode), then double-click `Launch-Mac-Configurator.command`. It builds a universal app at `MacConfigurator/build/PrintDeployGPO.app` and opens it. No PowerShell, Python, Node or external libraries are required to run the built app. To build without opening it:
+
+```bash
+bash MacConfigurator/build.sh
+```
+
+GitHub Actions builds a downloadable universal app ZIP under the **Mac verification** run's artifacts. Builds are ad hoc signed, without Developer ID signing or notarization; macOS may require approval to open an app downloaded from GitHub. Local builds avoid downloaded-file quarantine. Deployment-folder contents, real configurations and client logs are never packaged into the app.
 
 ## Pilot before rolling out
 
@@ -171,6 +194,8 @@ powershell.exe -NoProfile -File .\tests\Run-Tests.ps1
 The dependency-free tests parse every PowerShell source, exercise INF detection, path containment and cleanup selection, and use mocked Windows print commands to test deployment behavior. The tests can run under PowerShell 7 on macOS/Linux. They do not prove Windows API behavior, driver signatures, printer discovery or the Windows Forms layout. A real Windows pilot remains required.
 
 The client tests also cover before/after report uploads, error reporting, one-time removal receipts, computer/user scoping, changed-queue protection, corrupt report handling and local report retention when uploading fails. Pilot the NTFS log-folder permissions and SMB access on a Windows file server with actual computer and user accounts.
+
+For the Mac configuration/model tests, universal build and native GUI smoke checks, run `bash MacConfigurator/test.sh` on a logged-in Mac. Mac-generated JSON and package references are also checked with the PowerShell validator. Both platforms use the committed Templates files for GPO exports.
 
 On Windows PowerShell 5.1, run `powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\tests\Run-GuiSmoke.ps1` for GUI smoke checks. These construct the main window, client panel and printer editor using real Windows Forms, verify that each factory returns only its control, switch connection types, and load a saved configuration. No dialogs are displayed and no printers are installed. GitHub Actions runs both suites on Windows after each push. This checks construction and basic control behavior; visual layout and real printer installation still require a Windows pilot.
 

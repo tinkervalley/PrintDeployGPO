@@ -116,7 +116,7 @@ function Invoke-PDSelectedRemovals {
 
 function Complete-PDClientReporting {
     param($Config, [string]$Root, $Identity, [object[]]$Before, [hashtable]$Records, [object[]]$RemovalResults,
-        [string]$Result, [string]$ErrorMessage, [string]$StartedAt, [string]$LocalRoot)
+        [string]$Result, [string]$ErrorMessage, [string]$StartedAt, [string]$LocalRoot, [string[]]$UnsupportedPrinters = @())
     $originalResult = $Result
     $after = @(); $inventoryError = ''
     try { $after = @(Get-Printer -ErrorAction Stop) } catch { $inventoryError = $_.Exception.Message; $Result = 'Failed' }
@@ -124,13 +124,13 @@ function Complete-PDClientReporting {
     foreach ($key in $Records.Keys) { $verified[$key] = $Records[$key] }
     if ($Identity.Scope -eq 'Machine' -and -not $inventoryError) {
         try {
-            foreach ($p in @($Config.Printers | Where-Object { $_.Kind -in @('Type3','Type4') })) {
+            foreach ($p in @($Config.Printers | Where-Object { $_.Kind -in @('Type3','Type4') -and $_.Name -notin $UnsupportedPrinters })) {
                 if (-not (Test-PDPort (Get-PDTcpPort (Get-PDPortName $p)) $p)) { $verified.Remove($p.Name) }
             }
         } catch { $inventoryError = $_.Exception.Message; $Result = 'Failed' }
     }
     $report = New-PDClientReport -Config $Config -Identity $Identity -Before $Before -After $after -Records $verified `
-        -RemovalResults $RemovalResults -Result $Result -ErrorMessage $ErrorMessage -InventoryError $inventoryError -StartedAt $StartedAt
+        -RemovalResults $RemovalResults -Result $Result -ErrorMessage $ErrorMessage -InventoryError $inventoryError -StartedAt $StartedAt -UnsupportedPrinters $UnsupportedPrinters
     # Keep a local copy even when the share's report folder is unavailable.
     if ($LocalRoot -and (Test-Path -LiteralPath $LocalRoot -PathType Container)) {
         Write-PDJson $report (Join-Path $LocalRoot 'last-report.json')
@@ -177,7 +177,7 @@ function Invoke-PDDeployment {
     $script:PDLogPath = $null
     $dryRun = [bool]$WhatIfPreference
     $mutex = $null; $locked = $false
-    $reportConfig = $null; $records = @{}; $installed = @(); $beforeReport = @(); $removalResults = @()
+    $reportConfig = $null; $records = @{}; $installed = @(); $beforeReport = @(); $removalResults = @(); $unsupportedPrinters = @(); $applicablePrinters = @()
     $receipts = New-Object 'System.Collections.Generic.List[string]'
     $startedAt = (Get-Date).ToUniversalTime().ToString('o'); $runError = ''; $runResult = 'Failed'; $stateRoot = ''
     $root = Split-Path -Parent $ConfigPath
@@ -196,8 +196,11 @@ function Invoke-PDDeployment {
             }
         }
         $root = Split-Path -Parent $ConfigPath
-        $nativeArch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'ARM64' } else { 'x64' }
-        if ($config.Architecture -ne $nativeArch) { throw "This configuration targets $($config.Architecture), but this process is $nativeArch." }
+        $nativeArch = Get-PDNativeArchitecture
+        foreach ($p in @($config.Printers)) {
+            if (Test-PDPrinterArchitecture $p $root $nativeArch) { $applicablePrinters += @($p) }
+            else { $unsupportedPrinters += @($p.Name) }
+        }
         if (-not $dryRun) {
             Assert-PDAdministrator
         }
@@ -223,11 +226,12 @@ function Invoke-PDDeployment {
             $script:PDLogPath = Join-Path $stateRoot ("deploy-" + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.log')
         }
         Write-PDLog "Starting deployment $($config.DeploymentId); WhatIf=$dryRun"
+        foreach ($name in $unsupportedPrinters) { Write-PDLog "Skipping '$name': the selected driver name is not available for $nativeArch in its package." 'WARN' }
         $installed = @(Get-Printer -ErrorAction Stop)
         $beforeReport = @($installed | Select-Object Name,Type,DriverName,PortName,Location)
         $cleanup = @(Get-PDCleanupCandidates -Installed $installed -Config $config -Managed @($records.Values))
         # Resolve all collisions and port conflicts BEFORE driver changes or cleanup.
-        foreach ($p in @($config.Printers)) {
+        foreach ($p in $applicablePrinters) {
             $existing = Get-PDInstalledPrinter $p.Name
             $owned = $records.ContainsKey($p.Name) -and $existing -and
                 $records[$p.Name].PortName -eq $existing.PortName -and $records[$p.Name].DriverName -eq $existing.DriverName
@@ -243,7 +247,7 @@ function Invoke-PDDeployment {
             }
         }
         # Register all required drivers BEFORE removing old queues. A bad/signed-blocked package aborts cleanup.
-        foreach ($p in @($config.Printers | Where-Object { $_.Kind -in @('Type3','Type4') } | Sort-Object DriverName -Unique)) {
+        foreach ($p in @($applicablePrinters | Where-Object { $_.Kind -in @('Type3','Type4') } | Sort-Object DriverName -Unique)) {
             if ($PSCmdlet.ShouldProcess($p.DriverName, "Ensure $($p.Kind) driver is installed")) { Install-PDPackagedDriver $p $root }
         }
         if (-not $dryRun) {
@@ -268,7 +272,7 @@ function Invoke-PDDeployment {
             Write-PDLog "Client removal '$($result.Name)': $($result.Status). $($result.Message)"
             if ($result.Status -in @('Failed','Changed')) { $failures.Add("Client removal '$($result.Name)': $($result.Message)") }
         }
-        foreach ($p in @($config.Printers)) {
+        foreach ($p in $applicablePrinters) {
             try {
                 $existing = Get-PDInstalledPrinter $p.Name
                 $fingerprint = Get-PDPrinterFingerprint $p
@@ -340,7 +344,7 @@ function Invoke-PDDeployment {
             if (-not $dryRun -and $reportConfig -and ($locked -or -not $mutex)) {
                 try {
                     Complete-PDClientReporting -Config $reportConfig -Root $root -Identity (Get-PDClientIdentity -Scope Machine) `
-                        -Before $beforeReport -Records $records -RemovalResults $removalResults -Result $runResult -ErrorMessage $runError -StartedAt $startedAt -LocalRoot $stateRoot
+                        -Before $beforeReport -Records $records -RemovalResults $removalResults -Result $runResult -ErrorMessage $runError -StartedAt $startedAt -LocalRoot $stateRoot -UnsupportedPrinters $unsupportedPrinters
                 } catch {
                     Write-PDLog "Client reporting failed: $($_.Exception.Message)" 'ERROR'
                     if (-not $runError) { throw }

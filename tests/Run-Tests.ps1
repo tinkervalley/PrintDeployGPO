@@ -97,6 +97,14 @@ Model="Test Printer v4"
         (Get-Content $inf -Raw).Replace('%Model%=Install','%Missing%=Install') | Set-Content $bad
         Assert-Throws { Get-PDInfModels $bad } 'Unresolved INF string'
     }
+    Test-Case 'IPP is architecture independent and packaged drivers match native INF models' {
+        $printer=New-TestPrinter
+        Assert-True (Test-PDPrinterArchitecture $printer $tempRoot ARM64) 'IPP incorrectly requires architecture-specific resources.'
+        $printer.Kind='Type4'; $printer.InfPath='Drivers\vendor\printer.inf'; $printer.DriverName='Test Printer v4'
+        Assert-True (Test-PDPrinterArchitecture $printer $tempRoot x64) 'x64 driver was not detected.'
+        Assert-True (-not (Test-PDPrinterArchitecture $printer $tempRoot ARM64)) 'x64 model was offered to ARM64.'
+        $printer.DriverName='ARM printer'; Assert-True (Test-PDPrinterArchitecture $printer $tempRoot ARM64) 'ARM64 driver was not detected.'
+    }
     Test-Case 'Absolute paths, sibling escapes, traversal and ADS rejected' {
         foreach ($path in @('../outside.inf','Drivers/../../outside.inf','Drivers\..\outside.inf','/tmp/outside.inf','C:\outside.inf','Drivers/a.inf:stream')) {
             Assert-Throws { Resolve-PDResource $tempRoot $path } 'inside|escapes'
@@ -193,7 +201,8 @@ Model="Test Printer v4"
         $publishConfig = New-PDConfiguration; $publishConfig.Printers = @((New-TestPrinter))
         Publish-PDBundle $publishConfig $bundleRoot $projectRoot
         foreach ($relative in @('PrinterDeployment.ps1','Launch-Configurator.cmd','README.md','printers.json','GPO-Setup.txt','Install-PrinterDeploymentTask.ps1','Report-UserPrinters.ps1',
-            'Modules/PrinterDeployment.Core.psm1','Modules/PrinterDeployment.Deploy.psm1','Modules/PrinterDeployment.Gui.psm1','Modules/PrinterDeployment.Clients.psm1','Client Logs')) {
+            'Modules/PrinterDeployment.Core.psm1','Modules/PrinterDeployment.Deploy.psm1','Modules/PrinterDeployment.Gui.psm1','Modules/PrinterDeployment.Clients.psm1',
+            'Templates/Install-PrinterDeploymentTask.ps1.template','Templates/Report-UserPrinters.ps1.template','Client Logs')) {
             Assert-True (Test-Path -LiteralPath (Join-Path $bundleRoot $relative)) "Bundle missing $relative"
         }
         $published = Read-PDConfiguration (Join-Path $bundleRoot 'printers.json'); Assert-PDConfiguration $published $bundleRoot
@@ -502,6 +511,28 @@ Model="Test Printer v4"
         Invoke-PDDeployment $deploymentFile -RetryCount 1; Invoke-PDDeployment $deploymentFile -RetryCount 1
         Assert-True (@($global:PDMock.Printers | Where-Object { $_.Name -eq $printer.Name }).Count -eq 1) 'Type 3 queue duplicated.'
         Assert-True ('Driver:Legacy Type 3' -in $global:PDMock.Events) 'Type 3 driver registration skipped.'
+    }
+    Test-Case 'One mixed configuration installs IPP on ARM64 and skips incompatible legacy drivers without stale cleanup' {
+        $config=New-PDConfiguration; $config.Cleanup.RemoveStaleManaged=$true
+        $ipp=New-TestPrinter 'Cross-platform IPP'; $legacy=New-TestPrinter 'Cross-platform legacy' 'Type3'
+        $legacy.Address='192.0.2.57'; $legacy.PackagePath='Drivers\vendor'; $legacy.InfPath='Drivers\vendor\type3-deploy.inf'; $legacy.DriverName='Legacy Type 3'
+        $config.Printers=@($ipp,$legacy); Write-PDJson $config $deploymentFile
+        $originalArch=$env:PROCESSOR_ARCHITECTURE; $originalWowArch=$env:PROCESSOR_ARCHITEW6432
+        try {
+            $env:PROCESSOR_ARCHITECTURE='AMD64'; $env:PROCESSOR_ARCHITEW6432=''
+            Invoke-PDDeployment $deploymentFile -RetryCount 1
+            Assert-True ($legacy.Name -in $global:PDMock.Printers.Name) 'x64 legacy queue did not install.'
+            $env:PROCESSOR_ARCHITECTURE='ARM64'
+            $events=$global:PDMock.Events.Count
+            Invoke-PDDeployment $deploymentFile -RetryCount 1
+            $report=@(Get-PDClientReports $tempRoot $config.DeploymentId)[0]
+            Assert-True ($report.Result -eq 'Success' -and @($report.ConfiguredPrinters | Where-Object { $_.Name -eq $ipp.Name -and $_.Status -eq 'Installed' }).Count -eq 1) 'IPP did not work on ARM64 with an x64 configuration.'
+            Assert-True (@($report.ConfiguredPrinters | Where-Object { $_.Name -eq $legacy.Name -and $_.Status -eq 'Unsupported architecture' }).Count -eq 1) 'Unsupported legacy driver was not reported.'
+            Assert-True ($legacy.Name -in $global:PDMock.Printers.Name) 'Stale cleanup removed a configured architecture-skipped queue.'
+            Assert-True (@($global:PDMock.Events | Select-Object -Skip $events | Where-Object { $_ -like 'Driver:*' }).Count -eq 0) 'Unsupported driver was staged on ARM64.'
+            $env:PROCESSOR_ARCHITECTURE='AMD64'; $env:PROCESSOR_ARCHITEW6432='ARM64'
+            Assert-True ((Get-PDNativeArchitecture) -eq 'ARM64') 'Emulated host detection ignored native ARM64.'
+        } finally { $env:PROCESSOR_ARCHITECTURE=$originalArch; $env:PROCESSOR_ARCHITEW6432=$originalWowArch }
     }
     Test-Case 'User inventory reports old UNC connections with legacy cleanup disabled' {
         $config=New-PDConfiguration; Write-PDJson $config $deploymentFile

@@ -1,0 +1,33 @@
+name: Mac verification
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mac-configurator:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test configuration and reporting compatibility
+        run: |
+          xcrun swiftc -swift-version 5 -parse-as-library -module-cache-path "$RUNNER_TEMP/pd-cache" MacConfigurator/Sources/DeploymentModel.swift MacConfigurator/Sources/INFModels.swift MacConfigurator/Tests/ModelTests.swift -o "$RUNNER_TEMP/pd-model-tests"
+          "$RUNNER_TEMP/pd-model-tests"
+      - name: Build universal macOS application
+        run: bash MacConfigurator/build.sh
+      - name: Construct and exercise native Mac controls
+        run: MacConfigurator/build/PrintDeployGPO.app/Contents/MacOS/PrintDeployGPO --smoke-test
+      - name: Package application
+        run: ditto -c -k --sequesterRsrc --keepParent MacConfigurator/build/PrintDeployGPO.app MacConfigurator/build/PrintDeployGPO-macOS-universal.zip
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: PrintDeployGPO-macOS-universal
+          path: MacConfigurator/build/PrintDeployGPO-macOS-universal.zip
+          retention-days: 30

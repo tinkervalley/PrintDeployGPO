@@ -205,10 +205,10 @@ final class ConfiguratorController: NSObject, NSWindowDelegate, NSTextFieldDeleg
     let windowsRoot = NSTextField()
     let tabs = NSTabView()
     let printerTable = DataTable([("Name", "Printer", 220), ("Kind", "Type", 80), ("Address", "Endpoint", 330), ("Driver", "Driver", 220), ("Location", "Location", 130)])
-    let computerTable = DataTable([("Name", "Computer", 160), ("Status", "Status", 250), ("Installed", "Deployed", 110), ("Users", "User reports", 110), ("Reported", "Latest report", 250)])
-    let inventoryTable = DataTable([("Remove", "Remove", 60), ("Name", "Printer", 230), ("Owner", "Installed for", 170), ("Driver", "Driver", 200), ("Port", "Port", 150), ("Status", "Removal status", 230)])
+    let computerTable = DataTable([("Name", "Computer", 160), ("Status", "Last run", 145), ("Configuration", "Configuration", 145), ("Installed", "Verified", 90), ("Users", "User reports", 110), ("Reported", "Latest report", 250)])
+    let inventoryTable = DataTable([("Remove", "Remove", 60), ("Name", "Printer", 230), ("Owner", "Installed for", 170), ("Driver", "Driver", 200), ("Port", "Port", 150), ("Verification", "Deployment verification", 210), ("Status", "Removal status", 230)])
     let requestTable = DataTable([("Name", "Printer", 240), ("Owner", "Installed for", 180), ("Status", "Status", 120), ("Message", "Last result", 460)])
-    let detail = NSTextField(wrappingLabelWithString: "User connections appear after the user logon script uploads a report.")
+    let detail = NSTextView()
     let stale = NSButton(checkboxWithTitle: "Remove printers previously managed by this deployment when they leave the configuration", target: nil, action: nil)
     let userCleanup = NSButton(checkboxWithTitle: "Remove listed legacy names from user connections too (does not enable reporting)", target: nil, action: nil)
     let legacy = NSTextView()
@@ -253,9 +253,13 @@ final class ConfiguratorController: NSObject, NSWindowDelegate, NSTextFieldDeleg
         let requestBody = stack([requestTable.scroll, clear], vertical: true); requestTable.scroll.widthAnchor.constraint(equalTo: requestBody.widthAnchor).isActive = true; requestTable.scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true; requestsItem.view = requestBody
         nested.addTabViewItem(inventoryItem); nested.addTabViewItem(requestsItem)
         let hint = label("Select a computer, then check unwanted printers. Removal runs on the next SYSTEM task or the owning user's next logon."); hint.textColor = .secondaryLabelColor
-        let body = stack([stack([ActionButton("Refresh computers") { [weak self] in self?.refreshReports() }, ActionButton("Open Client Logs in Finder") { [weak self] in self?.showLogs() }]), computerTable.scroll, detail, nested, hint], vertical: true)
-        computerTable.scroll.heightAnchor.constraint(equalToConstant: 140).isActive = true; detail.heightAnchor.constraint(lessThanOrEqualToConstant: 85).isActive = true; nested.heightAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
-        for view in [computerTable.scroll, detail, nested, hint] { view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
+        detail.isEditable = false; detail.isRichText = false; detail.font = .systemFont(ofSize: 12); detail.drawsBackground = false
+        detail.isVerticallyResizable = true; detail.isHorizontallyResizable = false; detail.autoresizingMask = [.width]; detail.textContainer?.widthTracksTextView = true
+        let detailScroll = NSScrollView(); detailScroll.documentView = detail; detailScroll.hasVerticalScroller = true; detailScroll.borderType = .bezelBorder
+        computerTable.table.toolTip = "Last run is the recorded deployment result. Configuration compares settings, not file dates. Update pending is separate from a deployment failure. Verified counts queues checked against deployment state."
+        let body = stack([stack([ActionButton("Refresh computers") { [weak self] in self?.refreshReports() }, ActionButton("Open Client Logs in Finder") { [weak self] in self?.showLogs() }]), computerTable.scroll, detailScroll, nested, hint], vertical: true)
+        computerTable.scroll.heightAnchor.constraint(equalToConstant: 140).isActive = true; detailScroll.heightAnchor.constraint(equalToConstant: 130).isActive = true; nested.heightAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
+        for view in [computerTable.scroll, detailScroll, nested, hint] { view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true }
         addTab("Computers", body)
     }
     func addCleanupTab() {
@@ -305,7 +309,12 @@ final class ConfiguratorController: NSObject, NSWindowDelegate, NSTextFieldDeleg
     @objc func settingsChanged() { if loading { return }; var cleanup = model.config["Cleanup"] as? JSON ?? [:]; cleanup["RemoveStaleManaged"] = stale.state == .on; cleanup["CleanupUserConnections"] = userCleanup.state == .on; cleanup["LegacyPrinterNames"] = legacy.string.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }; model.config["Cleanup"] = cleanup; model.dirty = true; updateStatus("Unsaved configuration changes.") }
     @objc func legacyChanged() { settingsChanged() }
     func controlTextDidChange(_ obj: Notification) { updateStatus("Windows UNC path is used for bundle exports and stored locally on this Mac.") }
-    func updateStatus(_ message: String) { status.stringValue = message; window.isDocumentEdited = model.dirty; window.representedURL = model.configURL }
+    func updateStatus(_ message: String) {
+        status.stringValue = message; window.isDocumentEdited = model.dirty; window.representedURL = model.configURL
+        for row in computerTable.rows.indices where computers.indices.contains(row) { computerTable.rows[row]["Configuration"] = DeploymentModel.configurationStatus(computers[row].machine, config: model.config, unsaved: model.dirty) }
+        computerTable.table.reloadData()
+        if computerTable.table.selectedRow >= 0 { showComputer() }
+    }
     func refreshPrinters() { printerTable.replace(model.printers.map { ["Name": text($0, "Name"), "Kind": text($0, "Kind"), "Address": text($0, "Address"), "Driver": DeploymentModel.driverSummary($0), "Location": text($0, "Location")] }) }
     func editPrinter(new: Bool) {
         guard model.root != nil else { errorAlert(DeploymentError("Open or create a deployment first.")); return }
@@ -333,17 +342,15 @@ final class ConfiguratorController: NSObject, NSWindowDelegate, NSTextFieldDeleg
             let selected = computers.indices.contains(computerTable.table.selectedRow) ? computers[computerTable.table.selectedRow].name : ""
             computers = try model.loadReports()
             computerTable.replace(computers.map { computer in
-                var status = computer.reports.contains { text($0, "Result") == "Failed" } ? "Failed" : "Success"
-                let skipped = computer.machine.map { objects($0, "ConfiguredPrinters").filter { text($0, "Status") == "Unsupported architecture" }.count } ?? 0
-                if skipped > 0 { status += " / \(skipped) architecture skipped" }
-                if computer.machine == nil { status += " / no computer report" }; if computer.userCount == 0 { status += " / user inventory missing" }
-                if let savedAt = model.savedAt, computer.reports.contains(where: { (DeploymentModel.date(text($0, "ReportedAt")) ?? .distantPast) < savedAt }) { status += " / older than configuration" }
+                var status = computer.machine.map { text($0, "Result") == "Failed" ? "Needs attention" : "Completed" } ?? "Not reported"
+                if computer.reports.contains(where: { text($0, "Scope") == "UserConnection" && text($0, "Result") == "Failed" }) { status += " / user issue" }
+                let configuration = DeploymentModel.configurationStatus(computer.machine, config: model.config, unsaved: model.dirty)
                 let machine = computer.machine, count = machine.map { objects($0, "ConfiguredPrinters").count } ?? 0, installed = machine.map { objects($0, "ConfiguredPrinters").filter { text($0, "Status") == "Installed" }.count } ?? 0
                 let latest = computer.reports.map { text($0, "ReportedAt") }.sorted().last ?? ""
-                return ["Name": computer.name, "Status": status, "Installed": machine == nil ? "No report" : "\(installed)/\(count)", "Users": String(computer.userCount), "Reported": latest]
+                return ["Name": computer.name, "Status": status, "Configuration": configuration, "Installed": machine == nil ? "No report" : "\(installed)/\(count)", "Users": String(computer.userCount), "Reported": latest]
             }, selected: computers.firstIndex { $0.name == selected } ?? (computers.isEmpty ? -1 : 0))
             showComputer(); updateStatus("\(computers.count) computers loaded. \(model.warnings.count) invalid reports skipped.")
-            if !model.warnings.isEmpty { detail.stringValue += "\nSkipped reports: " + model.warnings.joined(separator: "; ") }
+            if !model.warnings.isEmpty { detail.string += "\nSkipped reports: " + model.warnings.joined(separator: "; ") }
         } catch { errorAlert(error) }
     }
     func showComputer() {
@@ -355,7 +362,7 @@ final class ConfiguratorController: NSObject, NSWindowDelegate, NSTextFieldDeleg
             let managed = model.printers.contains { same(text($0, "Name"), text(entry.printer, "Name")) }
             let result = request.flatMap { request in objects(entry.report, "RemovalResults").first { same(text($0, "Id"), text(request, "Id")) } }
             let state = managed ? "Stop deploying first" : (!entry.canRemove ? "Needs matching context" : (result.map { text($0, "Status") } ?? (request == nil ? "" : "Pending next run")))
-            return ["Remove": request == nil ? "0" : "1", "Name": text(entry.printer, "Name"), "Owner": entry.owner, "Driver": text(entry.printer, "DriverName"), "Port": text(entry.printer, "PortName"), "Status": state]
+            return ["Remove": request == nil ? "0" : "1", "Name": text(entry.printer, "Name"), "Owner": entry.owner, "Driver": text(entry.printer, "DriverName"), "Port": text(entry.printer, "PortName"), "Verification": managed ? (computer.machine.flatMap { objects($0, "ConfiguredPrinters").first { same(text($0, "Name"), text(entry.printer, "Name")) } }.map { DeploymentModel.printerStatusText(text($0, "Status")) } ?? "Configured; no computer result") : "Extra", "Status": state]
         })
         var rows = [[String: String]]()
         for report in computer.reports { for request in model.matchingRequests(report) {
@@ -364,8 +371,27 @@ final class ConfiguratorController: NSObject, NSWindowDelegate, NSTextFieldDeleg
             rows.append(["Name": text(request, "Name"), "Owner": text(report, "Scope") == "Machine" ? "Computer" : text(report, "UserName"), "Status": result.map { text($0, "Status") } ?? "Pending next run", "Message": result.map { text($0, "Message") } ?? "Saved requests apply on the next run in this context."])
         } }
         requestTable.replace(rows)
-        detail.stringValue = computer.reports.map { "\(text($0, "Scope") == "Machine" ? "Computer" : text($0, "UserName")): \(text($0, "Result")) • \(text($0, "ReportedAt")) \(text($0, "ErrorMessage")) \(text($0, "InventoryError"))" }.joined(separator: "\n")
-        if computer.userCount == 0 { detail.stringValue += "\nAdd Report-UserPrinters.ps1 to the USER logon GPO to collect shared-printer connections." }
+        let configuration = DeploymentModel.configurationStatus(computer.machine, config: model.config, unsaved: model.dirty)
+        let explanation: String
+        switch configuration {
+        case "Current": explanation = "The computer reported these configuration settings. This is separate from whether the run succeeded."
+        case "Update pending": explanation = "The loaded settings differ from the computer's last report. Its next scheduled run will read the saved configuration."
+        case "Unsaved changes": explanation = "Save your changes before clients can receive them."
+        case "Not compared": explanation = "This older client report cannot be compared by content. Save the updated deployment bundle and let the computer run again. File save times are not used to infer configuration changes."
+        default: explanation = "The SYSTEM task has not uploaded a computer report."
+        }
+        detail.string = "Configuration: \(configuration). \(explanation)\n\n" + computer.reports.map { report in
+            let owner = text(report, "Scope") == "Machine" ? "Computer" : text(report, "UserName")
+            let result = text(report, "Result") == "Failed" ? "Needs attention" : "Completed"
+            var lines = ["\(owner): \(result) at \(text(report, "ReportedAt"))"]
+            let message = text(report, "ErrorMessage"), explanation = DeploymentModel.reportErrorExplanation(message)
+            if !explanation.isEmpty { lines.append(explanation) }
+            for printer in objects(report, "ConfiguredPrinters") { lines.append("• \(text(printer, "Name")): \(DeploymentModel.printerStatusText(text(printer, "Status")))") }
+            if !message.isEmpty { lines.append("Technical details: " + message) }
+            if !text(report, "InventoryError").isEmpty { lines.append("Inventory error: " + text(report, "InventoryError")) }
+            return lines.joined(separator: "\n")
+        }.joined(separator: "\n\n")
+        if computer.userCount == 0 { detail.string += "\nAdd Report-UserPrinters.ps1 to the USER logon GPO to collect shared-printer connections." }
     }
     func clearRequest() { let row = requestTable.table.selectedRow; guard selectedRequests.indices.contains(row) else { return }; let id = text(selectedRequests[row], "Id"); model.removals = model.removals.filter { !same(text($0, "Id"), id) }; showComputer(); updateStatus("Request cleared. Save to publish.") }
     func showLogs() { if let root = model.root { NSWorkspace.shared.open(root.appendingPathComponent("Client Logs")) } }

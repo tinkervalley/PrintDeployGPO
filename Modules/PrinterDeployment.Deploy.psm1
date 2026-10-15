@@ -238,7 +238,7 @@ function Invoke-PDDeployment {
             if ($existing -and -not $owned) {
                 $sameTcp = $p.Kind -in @('Type3','Type4') -and $existing.DriverName -eq $p.DriverName -and
                     $existing.PortName -eq (Get-PDPortName $p) -and (Test-PDPort (Get-PDTcpPort $existing.PortName) $p)
-                if (-not $sameTcp) { throw "Printer '$($p.Name)' exists outside this tool's management. Rename it or the configured queue before deploying." }
+                if (-not $sameTcp) { throw "Name conflict: '$($p.Name)' is present, but its connection and ownership could not be verified for this deployment. It was left unchanged. Review its driver and port in Reported printers before choosing a different queue name or removing an old copy." }
             }
             if ($p.Kind -in @('Type3','Type4')) {
                 $portName = Get-PDPortName $p
@@ -308,7 +308,14 @@ function Invoke-PDDeployment {
                         # IPP has its own Add-Printer parameter set; DriverName cannot be passed alongside IppURL.
                         if ($existing) { Remove-Printer -InputObject $existing -ErrorAction Stop }
                         try {
-                            Add-Printer -Name $p.Name -IppURL $p.Address -Location $p.Location -Comment $p.Comment -ErrorAction Stop
+                            try { Add-Printer -Name $p.Name -IppURL $p.Address -Location $p.Location -Comment $p.Comment -ErrorAction Stop }
+                            catch {
+                                $nativeCode = $_.Exception.HResult -band 0xffff
+                                if ($nativeCode -in @(183,1802) -or "$($_.FullyQualifiedErrorId) $($_.Exception.Message)" -match 'already exists|0x8007070a|0x800700b7') {
+                                    throw "IPP setup conflict at '$($p.Address)': Windows refused to add the requested queue '$($p.Name)' because a printer or device registration already exists. This does not confirm that the configured queue is installed. Review older copies in Reported printers; do not remove unrelated printers. Windows message: $($_.Exception.Message)"
+                                }
+                                throw
+                            }
                             $created = Get-PDInstalledPrinter $p.Name
                             if (-not $created) { throw 'IPP discovery did not create the requested queue.' }
                             if ($created.DriverName -ne 'Microsoft IPP Class Driver') {

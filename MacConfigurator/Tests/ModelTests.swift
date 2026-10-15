@@ -6,13 +6,24 @@ func expectError(_ body: () throws -> Void) throws { do { try body() } catch { r
 
 @main struct ModelTests {
     static func main() {
-        do { try run(); print("All 15 Mac model checks passed.") } catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
+        do { try run(); print("All Mac model checks passed.") } catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
     }
     static func run() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("pd-mac-tests-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let model = DeploymentModel(); try model.create(in: root)
+        let fixture = try readJSON(URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("tests/Fixtures/configuration-revision.json"))
+        let fixtureConfig = fixture["Configuration"] as! JSON, expectedHash = text(fixture, "ExpectedHash")
+        try expect(DeploymentModel.configurationContentHash(fixtureConfig) == expectedHash, "Portable revision differs from PowerShell fixture.")
+        let matchingReport: JSON = ["ConfigurationContentHash": expectedHash]
+        try expect(DeploymentModel.configurationStatus(matchingReport, config: fixtureConfig) == "Current", "Matching settings reported outdated.")
+        var changed = fixtureConfig; changed["Architecture"] = "ARM64"
+        try expect(DeploymentModel.configurationStatus(matchingReport, config: changed) == "Update pending", "Changed configuration not detected.")
+        try expect(DeploymentModel.configurationStatus(matchingReport, config: changed, unsaved: true) == "Unsaved changes", "Unsaved settings looked published.")
+        try expect(DeploymentModel.configurationStatus(["ReportedAt": "2000-01-01T00:00:00Z"], config: fixtureConfig) == "Not compared", "Old report date was incorrectly treated as changed settings.")
+        try expect(DeploymentModel.reportErrorExplanation("The specified printer already exists.").contains("not confirmation"), "Existing-printer error implied success.")
+        print("PASS portable settings revision and clear conflict explanations")
         let endpoint = IppEndpoint(host: "192.0.2.55", scheme: "ipp", path: "/ipp", port: 631)
         try expect(try endpoint.address() == "ipp://192.0.2.55:631/ipp", "IPP default failed.")
         try expect(try IppEndpoint(host: "2001:db8::55", scheme: "ipps", path: "ipp/print", port: 443).address() == "ipps://[2001:db8::55]:443/ipp/print", "IPv6/custom port failed.")

@@ -27,6 +27,64 @@ function Get-PDConfigurationHash {
     Get-PDHash ($normalized | ConvertTo-Json -Depth 12 -Compress)
 }
 
+function Get-PDConfigurationContentHash {
+    param($Config)
+    # Versioned, order-independent encoding shared with the Mac app. RequestedAt is
+    # display metadata; removal identity and all operational settings remain included.
+    $builder = New-Object Text.StringBuilder
+    [void]$builder.Append('PDConfig1:')
+    function Add-Value($Value) {
+        if ($null -eq $Value) { [void]$builder.Append('z'); return }
+        if ($Value -is [bool]) { [void]$builder.Append($(if ($Value) { 'b1' } else { 'b0' })); return }
+        if ($Value -is [string]) { [void]$builder.Append('s').Append([Text.Encoding]::UTF8.GetByteCount($Value)).Append(':').Append($Value); return }
+        if ($Value -is [System.Collections.IDictionary] -or $Value -is [pscustomobject]) {
+            $isMap = $Value -is [System.Collections.IDictionary]
+            [string[]]$keys = @(@(if ($isMap) { $Value.Keys } else { $Value.PSObject.Properties.Name }) | Where-Object { $_ -ne 'RequestedAt' })
+            [Array]::Sort($keys, [StringComparer]::Ordinal)
+            [void]$builder.Append('o').Append($keys.Count).Append(':')
+            foreach ($key in $keys) { Add-Value $key; if ($isMap) { Add-Value $Value[$key] } else { Add-Value $Value.$key } }; return
+        }
+        if ($Value -is [System.Collections.IEnumerable]) {
+            [void]$builder.Append('a').Append(@($Value).Count).Append(':'); foreach ($item in $Value) { Add-Value $item }; return
+        }
+        if ($Value -is [ValueType] -and $Value -isnot [datetime] -and $Value -isnot [datetimeoffset]) {
+            [void]$builder.Append('n').Append(([decimal]$Value).ToString('G29',[Globalization.CultureInfo]::InvariantCulture)).Append(';'); return
+        }
+        throw 'Unsupported configuration value for report comparison.'
+    }
+    Add-Value $Config
+    Get-PDHash $builder.ToString()
+}
+
+function Get-PDReportedPrinterStatusText {
+    param([string]$Status)
+    switch ($Status) {
+        'Installed' { 'Installed and verified' }
+        'Missing' { 'Configured queue missing' }
+        'Needs reconciliation' { 'Present; settings not verified' }
+        'Unknown' { 'Inventory unavailable' }
+        'Unsupported architecture' { 'Skipped; no compatible driver' }
+        default { $Status }
+    }
+}
+
+function Get-PDReportErrorExplanation {
+    param([string]$Message)
+    if ($Message -match 'specified printer already exists|0x8007070a|0x800700b7') {
+        return 'Windows reported a printer/device registration conflict while adding a queue. This is not confirmation that the requested queue is installed. Check the per-printer verification below and review older copies in Reported printers.'
+    }
+    if ($Message -match "exists outside this tool.s management|Name conflict:") { return 'A same-name queue is present, but this deployment could not verify its connection/ownership. Review its driver and port before renaming or removing an old copy.' }
+    return ''
+}
+
+function Get-PDReportConfigurationStatus {
+    param($Report, $Config, [switch]$Unsaved)
+    if ($Unsaved) { return 'Unsaved changes' }
+    if (-not $Report) { return 'No computer report' }
+    $matches = if ($Report.PSObject.Properties['ConfigurationContentHash']) { $Report.ConfigurationContentHash -eq (Get-PDConfigurationContentHash $Config) } else { $Report.ConfigurationHash -eq (Get-PDConfigurationHash $Config) }
+    if ($matches) { 'Current' } else { 'Update pending' }
+}
+
 function Get-PDClientRemovalRequests {
     param($Config, $Identity)
     if (-not $Config.PSObject.Properties['ClientRemovals']) { return }
@@ -92,7 +150,7 @@ function New-PDClientReport {
         SchemaVersion=1; DeploymentId=$Config.DeploymentId; ComputerName=$Identity.ComputerName; Scope=$Identity.Scope
         UserSid=$Identity.UserSid; UserName=$Identity.UserName; RunId=$RunId; StartedAt=$StartedAt
         ReportedAt=(Get-Date).ToUniversalTime().ToString('o'); Result=$Result; ErrorMessage=$ErrorMessage; InventoryError=$InventoryError
-        ConfigurationHash=(Get-PDConfigurationHash $Config)
+        ConfigurationHash=(Get-PDConfigurationHash $Config); ConfigurationContentHash=(Get-PDConfigurationContentHash $Config)
         Before=@($Before | Select-Object Name,Type,DriverName,PortName); Printers=$printers
         ConfiguredPrinters=$verification; RemovalResults=@($RemovalResults)
     }
@@ -135,6 +193,7 @@ function Get-PDClientReports {
                 if ($report.$field -isnot [string]) { throw 'Invalid report metadata.' }
             }
             if ($report.ConfigurationHash -notmatch '^[0-9a-f]{64}$') { throw 'Invalid report configuration revision.' }
+            if ($report.PSObject.Properties['ConfigurationContentHash'] -and $report.ConfigurationContentHash -notmatch '^[0-9a-f]{64}$') { throw 'Invalid report content revision.' }
             foreach ($p in $report.Printers) {
                 foreach ($field in @('Name','Type','DriverName','PortName','Location')) { if ($p.$field -isnot [string]) { throw 'Invalid printer inventory.' } }
             }

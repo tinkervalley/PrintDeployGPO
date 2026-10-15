@@ -382,6 +382,22 @@ Model="Test Printer v4"
         $path=Join-Path $tempRoot 'hash.json'; Write-PDJson $hashConfig $path
         Assert-True ((Get-PDConfigurationHash $hashConfig) -eq (Get-PDConfigurationHash (Read-PDConfiguration $path))) 'Saved/read requests changed the configuration revision.'
     }
+    Test-Case 'Content revision is portable, ignores save formatting, and detects real settings changes' {
+        $fixture=Get-Content (Join-Path $PSScriptRoot 'Fixtures/configuration-revision.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-True ((Get-PDConfigurationContentHash $fixture.Configuration) -eq $fixture.ExpectedHash) 'Portable revision disagrees with the shared fixture.'
+        $config=$fixture.Configuration; $report=[pscustomobject]@{ ConfigurationContentHash=$fixture.ExpectedHash }
+        Assert-True ((Get-PDReportConfigurationStatus $report $config) -eq 'Current') 'Matching report was marked outdated.'
+        $config.ClientRemovals[0].RequestedAt='2026-10-15T13:00:00Z'
+        Assert-True ((Get-PDConfigurationContentHash $config) -eq $fixture.ExpectedHash) 'Display timestamp changed operational revision.'
+        $config.Printers[0].Address='ipp://another.example.test:631/ipp'
+        Assert-True ((Get-PDReportConfigurationStatus $report $config) -eq 'Update pending') 'Changed endpoint was not detected.'
+        Assert-True ((Get-PDReportConfigurationStatus $report $config -Unsaved) -eq 'Unsaved changes') 'Unpublished changes looked deployed.'
+    }
+    Test-Case 'Report explanations distinguish existing device conflicts from verified installation' {
+        Assert-True ((Get-PDReportErrorExplanation 'The specified printer already exists.') -match 'not confirmation') 'Duplicate-device message implies success.'
+        Assert-True ((Get-PDReportedPrinterStatusText 'Needs reconciliation') -eq 'Present; settings not verified') 'Present queue status is unclear.'
+        Assert-True ((Get-PDReportedPrinterStatusText 'Installed') -eq 'Installed and verified') 'Verified queue status is unclear.'
+    }
     Test-Case 'Report round-trip includes inventories, errors and filters unrelated or malformed reports' {
         $reportRoot=Join-Path $tempRoot 'ReportTests'; New-Item -ItemType Directory -Path $reportRoot | Out-Null
         $reportConfig=New-PDConfiguration
@@ -481,7 +497,7 @@ Model="Test Printer v4"
             [CmdletBinding()]param([string]$Name,[string]$IppURL,[string]$DriverName,[string]$PortName,[string]$Location,[string]$Comment)
             $global:PDMock.Events.Add('Add:' + $Name)
             if ($IppURL) {
-                if ($global:PDMock.IppFailure) { throw 'Mock IPP unavailable' }
+                if ($global:PDMock.ContainsKey('IppConflict') -and $global:PDMock.IppConflict) { throw 'The specified printer already exists.' }; if ($global:PDMock.IppFailure) { throw 'Mock IPP unavailable' }
                 $DriverName = 'Microsoft IPP Class Driver'; $PortName = 'IPP_' + $Name
             }
             $global:PDMock.Printers += [pscustomobject]@{ Name=$Name; Type='Local'; DriverName=$DriverName; PortName=$PortName; Location=$Location; Comment=$Comment }
@@ -536,12 +552,21 @@ Model="Test Printer v4"
         $reports=@(Get-PDClientReports $tempRoot $c.DeploymentId)
         Assert-True ($reports[0].Result -eq 'Failed' -and $reports[0].ErrorMessage -match 'Mock IPP unavailable') 'Failed deployment was not reported.'
     }
+    Test-Case 'IPP duplicate discovery explains a missing configured queue and preserves unrelated copies' {
+        $config=New-PDConfiguration; $config.Printers=@((New-TestPrinter 'Conflicting discovery'))
+        $old=[pscustomobject]@{ Name='Older device copy'; Type='Local'; DriverName='Microsoft IPP Class Driver'; PortName='WSD_old'; Location=''; Comment='' }
+        $global:PDMock.Printers += $old; Write-PDJson $config $deploymentFile; $global:PDMock.IppConflict=$true
+        try { Assert-Throws { Invoke-PDDeployment -ConfigPath $deploymentFile -RetryCount 1 } 'IPP setup conflict.*does not confirm' }
+        finally { $global:PDMock.IppConflict=$false }
+        $report=@(Get-PDClientReports $tempRoot $config.DeploymentId)[0]
+        Assert-True ($report.Result -eq 'Failed' -and $report.ConfiguredPrinters[0].Status -eq 'Missing' -and 'Older device copy' -in $global:PDMock.Printers.Name) 'Conflict was misreported or removed an unrelated printer.'
+    }
     Test-Case 'Foreign same-name queue aborts before cleanup' {
         $foreign = New-PDConfiguration; $foreign.Printers = @((New-TestPrinter)); $foreign.Cleanup.LegacyPrinterNames = @('Old Copy')
         $global:PDMock.Printers += [pscustomobject]@{ Name='Old Copy'; Type='Local'; DriverName='v4'; PortName='Old'; Location=''; Comment='' }
         Write-PDJson $foreign $deploymentFile
         $count = $global:PDMock.Events.Count
-        Assert-Throws { Invoke-PDDeployment -ConfigPath $deploymentFile -RetryCount 1 } 'outside this tool'
+        Assert-Throws { Invoke-PDDeployment -ConfigPath $deploymentFile -RetryCount 1 } 'Name conflict:'
         Assert-True ($count -eq $global:PDMock.Events.Count -and 'Old Copy' -in $global:PDMock.Printers.Name) 'Collision caused mutation.'
     }
     Test-Case 'Invalid configuration fails before any cleanup or install command' {
@@ -736,9 +761,9 @@ Model="Test Printer v4"
             $local=Read-PDConfiguration (Join-Path $env:ProgramData ('PrinterDeploymentTool/' + $uploadConfig.DeploymentId + '/last-report.json'))
             Assert-True ($local.Result -eq 'Success' -and $local.Printers.Count -gt 0) 'Local report was lost when upload failed.'
             $uploadConfig.Printers=@((New-TestPrinter 'Office')); Write-PDJson $uploadConfig $deploymentFile
-            Assert-Throws { Invoke-PDDeployment $deploymentFile -RetryCount 1 } 'outside this tool'
+            Assert-Throws { Invoke-PDDeployment $deploymentFile -RetryCount 1 } 'Name conflict:'
             $local=Read-PDConfiguration (Join-Path $env:ProgramData ('PrinterDeploymentTool/' + $uploadConfig.DeploymentId + '/last-report.json'))
-            Assert-True ($local.Result -eq 'Failed' -and $local.ErrorMessage -match 'outside this tool') 'Original failure not retained in local report.'
+            Assert-True ($local.Result -eq 'Failed' -and $local.ErrorMessage -match 'Name conflict:') 'Original failure not retained in local report.'
         } finally { $global:PDMock.UploadFailure=$false }
     }
     Write-Host "All $script:Passed tests passed. Windows integration and GUI pilot still required."

@@ -419,16 +419,18 @@ function New-PDClientsPanel {
     $view = @{ Loading=$false; Report=$null }
     $panel = New-Object Windows.Forms.TableLayoutPanel
     $panel.Dock='Fill'; $panel.ColumnCount=1; $panel.RowCount=4; $panel.Padding='10,10,10,10'
-    foreach ($height in @(48,160,65)) { [void]$panel.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute',$height))) }
+    foreach ($height in @(48,160,130)) { [void]$panel.RowStyles.Add((New-Object Windows.Forms.RowStyle('Absolute',$height))) }
     [void]$panel.RowStyles.Add((New-Object Windows.Forms.RowStyle('Percent',100)))
     $toolbar = New-Object Windows.Forms.FlowLayoutPanel; $toolbar.Dock='Fill'; $panel.Controls.Add($toolbar,0,0)
     $clients = New-Object Windows.Forms.DataGridView
     $clients.Dock='Fill'; $clients.ReadOnly=$true; $clients.AllowUserToAddRows=$false; $clients.RowHeadersVisible=$false
     $clients.MultiSelect=$false; $clients.SelectionMode='FullRowSelect'; $clients.AutoSizeColumnsMode='Fill'; $clients.BackgroundColor=[Drawing.Color]::White
-    foreach ($spec in @(@('Computer','Computer',20),@('ReportedAt','Last report',20),@('Result','Status',30),@('Installed','Deployed',15),@('Users','User reports',15))) {
+    foreach ($spec in @(@('Computer','Computer',18),@('ReportedAt','Last report',18),@('Result','Last run',18),@('Configuration','Configuration',18),@('Installed','Verified',14),@('Users','User reports',14))) {
         $column = New-Object Windows.Forms.DataGridViewTextBoxColumn; $column.Name=$spec[0]; $column.HeaderText=$spec[1]; $column.FillWeight=$spec[2]
         [void]$clients.Columns.Add($column)
     }
+    $clients.Columns['Configuration'].ToolTipText='Current: settings match the report. Update pending: saved settings differ; the next run will read them. This is separate from the last run result.'
+    $clients.Columns['Installed'].ToolTipText='Configured queues verified against this deployment state, out of all desired queues. A differently named copy does not count as the configured queue.'
     $panel.Controls.Add($clients,0,1)
     $detail = New-Object Windows.Forms.TextBox; $detail.Dock='Fill'; $detail.Multiline=$true; $detail.ReadOnly=$true; $detail.ScrollBars='Vertical'
     $detail.Text='Select a computer to see computer and user printers together. Check unwanted queues, then Save deployment bundle. User reporting requires the exported logon script.'
@@ -462,6 +464,7 @@ function New-PDClientsPanel {
         try {
             $inventory.Rows.Clear(); $requests.Rows.Clear()
             if (-not $view.Report) { return }
+            foreach ($clientRow in $clients.Rows) { $clientRow.Cells['Configuration'].Value=Get-PDReportConfigurationStatus $clientRow.Tag.MachineReport $Data.Config -Unsaved:$Data.Dirty }
             $computer=$view.Report
             $wanted=@($Data.Config.Printers | ForEach-Object { $_.Name })
             foreach ($entry in @($computer.Printers)) {
@@ -474,7 +477,8 @@ function New-PDClientsPanel {
                     $removalStatus=if ($result.Count) { $result[0].Status } else { 'Pending next run' }
                 }
                 $desired=$p.Name -in $wanted
-                $deployment=if ($desired) { 'Managed' } else { 'Extra' }
+                $verification=if ($computer.MachineReport) { @($computer.MachineReport.ConfiguredPrinters | Where-Object { $_.Name -eq $p.Name }) } else { @() }
+                $deployment=if (-not $desired) { 'Extra' } elseif ($verification.Count) { Get-PDReportedPrinterStatusText $verification[0].Status } else { 'Configured; no computer result' }
                 if (-not $entry.CanRemove) { $removalStatus='Needs matching context report' }
                 elseif ($desired) { $removalStatus='Remove from Printers first' }
                 $index=$inventory.Rows.Add([object[]]@(($request.Count -gt 0),$p.Name,$entry.Owner,$p.DriverName,$p.PortName,$deployment,$removalStatus))
@@ -482,12 +486,24 @@ function New-PDClientsPanel {
                 $inventory.Rows[$index].Cells['Remove'].ReadOnly=$desired -or -not $entry.CanRemove
                 $inventory.Rows[$index].Cells['Remove'].ToolTipText=if ($desired) { 'Stop deploying this printer in the Printers tab before scheduling removal.' } else { 'Remove once on the next computer run or this user logon.' }
             }
-            $details=@()
+            $configuration=Get-PDReportConfigurationStatus $computer.MachineReport $Data.Config -Unsaved:$Data.Dirty
+            $explanation=switch ($configuration) {
+                'Current' { 'The computer reported these settings. This is separate from whether the run succeeded.' }
+                'Update pending' { 'The loaded settings differ from the computer report. Its next scheduled run will read the saved configuration.' }
+                'Unsaved changes' { 'Save your changes before clients can receive them.' }
+                default { 'The SYSTEM task has not uploaded a computer report.' }
+            }
+            $details=@("Configuration: $configuration. $explanation",'')
             foreach ($report in @($computer.Reports)) {
                 $ownerText=if ($report.Scope -eq 'Machine') { 'Computer' } else { $report.UserName }
                 $seen=([datetimeoffset]::Parse($report.ReportedAt)).LocalDateTime.ToString('yyyy-MM-dd HH:mm')
-                $verification=@($report.ConfiguredPrinters | ForEach-Object { "$($_.Name): $($_.Status)" }) -join '; '
-                $details += "$ownerText ($seen): $($report.Result). $($report.ErrorMessage) $($report.InventoryError) $verification"
+                $resultText=if ($report.Result -eq 'Failed') { 'Needs attention' } else { 'Completed' }
+                $details += "$ownerText ($seen): $resultText."
+                $explanation=Get-PDReportErrorExplanation $report.ErrorMessage
+                if ($explanation) { $details += $explanation }
+                $details += @($report.ConfiguredPrinters | ForEach-Object { "$($_.Name): $(Get-PDReportedPrinterStatusText $_.Status)" })
+                if ($report.ErrorMessage) { $details += "Technical details: $($report.ErrorMessage)" }
+                if ($report.InventoryError) { $details += "Inventory error: $($report.InventoryError)" }
                 foreach ($request in @(Get-PDClientRemovalRequests $Data.Config $report)) {
                     $last=@($report.RemovalResults | Where-Object { $_.Id -eq $request.Id })
                     $status=if ($last.Count) { $last[0].Status } else { 'Pending next run' }
@@ -504,16 +520,13 @@ function New-PDClientsPanel {
             if (-not $Data.Root) { throw 'Choose a deployment folder first.' }
             $view.Loading=$true; $view.Report=$null; $clients.Rows.Clear(); $inventory.Rows.Clear(); $requests.Rows.Clear()
             $reports=@(Get-PDClientReports -Root $Data.Root -DeploymentId $Data.Config.DeploymentId | Sort-Object ComputerName,Scope,UserName)
-            $wanted=@($Data.Config.Printers | ForEach-Object { $_.Name }); $hash=Get-PDConfigurationHash $Data.Config
+            $wanted=@($Data.Config.Printers | ForEach-Object { $_.Name })
             $computers=@(Get-PDComputerInventory -Reports $reports)
             foreach ($computer in $computers) {
                 $machine=$computer.MachineReport
-                $result=if (@($computer.Reports | Where-Object { $_.Result -eq 'Failed' }).Count) { 'Failed' } else { 'Success' }
-                $skipped=if ($machine) { @($machine.ConfiguredPrinters | Where-Object { $_.Status -eq 'Unsupported architecture' }).Count } else { 0 }
-                if ($skipped) { $result += " / $skipped architecture skipped" }
-                if (-not $machine) { $result += ' / no computer report' }
-                if ($computer.UserReportCount -eq 0) { $result += ' / user inventory missing' }
-                if (@($computer.Reports | Where-Object { $_.ConfigurationHash -ne $hash }).Count) { $result += ' / changes pending' }
+                $result=if (-not $machine) { 'Not reported' } elseif ($machine.Result -eq 'Failed') { 'Needs attention' } else { 'Completed' }
+                if (@($computer.Reports | Where-Object { $_.Scope -eq 'UserConnection' -and $_.Result -eq 'Failed' }).Count) { $result += ' / user issue' }
+                $configuration=Get-PDReportConfigurationStatus $machine $Data.Config -Unsaved:$Data.Dirty
                 $desired='No report'
                 if ($machine) {
                     $installed=@($machine.ConfiguredPrinters | Where-Object { $_.Status -eq 'Installed' }).Count
@@ -521,8 +534,8 @@ function New-PDClientsPanel {
                 }
                 $latest=@($computer.Reports | Sort-Object { [datetimeoffset]::Parse($_.ReportedAt) } -Descending)[0]
                 $seen=([datetimeoffset]::Parse($latest.ReportedAt)).LocalDateTime.ToString('yyyy-MM-dd HH:mm')
-                $index=$clients.Rows.Add([object[]]@($computer.ComputerName,$seen,$result,$desired,$computer.UserReportCount)); $clients.Rows[$index].Tag=$computer
-                if ($result.StartsWith('Failed')) { $clients.Rows[$index].DefaultCellStyle.ForeColor=[Drawing.Color]::Firebrick }
+                $index=$clients.Rows.Add([object[]]@($computer.ComputerName,$seen,$result,$configuration,$desired,$computer.UserReportCount)); $clients.Rows[$index].Tag=$computer
+                if ($result -match 'Needs attention|user issue') { $clients.Rows[$index].DefaultCellStyle.ForeColor=[Drawing.Color]::Firebrick }
             }
             $StatusLabel.Text="$($computers.Count) computers loaded. Select a computer to review all reported printers."
         } catch { Show-PDError $_ }

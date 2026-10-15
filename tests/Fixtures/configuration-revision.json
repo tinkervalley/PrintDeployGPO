@@ -1,0 +1,38 @@
+{
+  "Configuration": {
+    "SchemaVersion": 2,
+    "DeploymentId": "11111111-1111-4111-8111-111111111111",
+    "Architecture": "x64",
+    "Cleanup": {
+      "RemoveStaleManaged": false,
+      "CleanupUserConnections": false,
+      "LegacyPrinterNames": []
+    },
+    "Printers": [
+      {
+        "Name": "Office — Étage 😀",
+        "Kind": "IPP",
+        "Address": "ipp://printer.example.test:631/ipp/print",
+        "PortNumber": 631,
+        "Location": "Upstairs",
+        "Comment": "Quotes \" and \\ and\nnew line",
+        "PackagePath": "",
+        "InfPath": "",
+        "DriverName": ""
+      }
+    ],
+    "ClientRemovals": [
+      {
+        "Id": "22222222-2222-4222-8222-222222222222",
+        "ComputerName": "PC001",
+        "Scope": "Machine",
+        "UserSid": "",
+        "Name": "Old queue",
+        "DriverName": "Old driver",
+        "PortName": "IP_old",
+        "RequestedAt": "2026-10-15T12:00:00.1234567Z"
+      }
+    ]
+  },
+  "ExpectedHash": "e9d7ce9b6a026d6a26d96a94db37f7d1acd1c1cde8ff7c3ed1aaaeb89996afa1"
+}

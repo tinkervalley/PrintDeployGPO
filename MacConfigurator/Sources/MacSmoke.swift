@@ -38,7 +38,7 @@ enum MacSmoke {
         let shared: JSON = ["Name": "\\\\domain\\printer", "Type": "Connection", "DriverName": "Legacy", "PortName": "UNC", "Location": ""]
         let sid = "S-1-5-21-1-2-3-1001"
         func report(_ scope: String) -> JSON {
-            ["SchemaVersion": 1, "DeploymentId": text(model.config, "DeploymentId"), "ComputerName": "PC001", "Scope": scope, "UserSid": scope == "Machine" ? "" : sid, "UserName": scope == "Machine" ? "SYSTEM" : "DOMAIN\\Alice", "Result": "Success", "ReportedAt": "2026-10-13T21:00:00Z", "StartedAt": "2026-10-13T20:59:00Z", "ErrorMessage": "", "InventoryError": "", "ConfigurationHash": String(repeating: "0", count: 64), "Printers": scope == "Machine" ? [local] : [local, shared], "ConfiguredPrinters": scope == "Machine" ? [["Name": "Office", "Status": "Installed"], ["Name": "Legacy", "Status": "Unsupported architecture"]] : [JSON](), "RemovalResults": [JSON]()]
+            ["SchemaVersion": 1, "DeploymentId": text(model.config, "DeploymentId"), "ComputerName": "PC001", "Scope": scope, "UserSid": scope == "Machine" ? "" : sid, "UserName": scope == "Machine" ? "SYSTEM" : "DOMAIN\\Alice", "Result": "Success", "ReportedAt": "2026-10-13T21:00:00Z", "StartedAt": "2026-10-13T20:59:00Z", "ErrorMessage": "", "InventoryError": "", "ConfigurationHash": String(repeating: "0", count: 64), "ConfigurationContentHash": DeploymentModel.configurationContentHash(controller.model.config), "Printers": scope == "Machine" ? [local] : [local, shared], "ConfiguredPrinters": scope == "Machine" ? [["Name": "Office", "Status": "Installed"], ["Name": "Legacy", "Status": "Unsupported architecture"]] : [JSON](), "RemovalResults": [JSON]()]
         }
         let hash = SHA256.hash(data: Data(sid.utf8)).map { String(format: "%02x", $0) }.joined()
         for (folder, scope) in [("PC001", "Machine"), ("PC001--user-" + String(hash.prefix(16)), "UserConnection")] {
@@ -47,10 +47,17 @@ enum MacSmoke {
         }
         controller.refreshReports()
         guard controller.computerTable.rows.count == 1, controller.inventoryTable.rows.count == 2, let userRow = controller.entries.firstIndex(where: { text($0.report, "Scope") == "UserConnection" }) else { throw DeploymentError("Native Mac inventory did not combine computer/user reports.") }
+        guard controller.computerTable.rows[0]["Status"] == "Completed", controller.computerTable.rows[0]["Configuration"] == "Current", controller.detail.string.contains("Installed and verified") else { throw DeploymentError("Last run and content revision are not independently displayed.") }
         let column = controller.inventoryTable.table.tableColumns.first { $0.identifier.rawValue == "Remove" }!
         guard let checkbox = controller.inventoryTable.tableView(controller.inventoryTable.table, viewFor: column, row: userRow) as? NSButton else { throw DeploymentError("Native inventory removal control is missing.") }
         checkbox.performClick(nil)
         guard controller.model.removals.count == 1, text(controller.model.removals[0], "UserSid") == sid else { throw DeploymentError("Native inventory checkbox lost its user scope.") }
+        guard controller.computerTable.rows[0]["Configuration"] == "Unsaved changes" else { throw DeploymentError("Editing left the configuration column showing Current.") }
+        try controller.model.save()
+        var conflict = report("Machine"); conflict["Result"] = "Failed"; conflict["ErrorMessage"] = "Printer 'Office': The specified printer already exists."
+        conflict["ConfiguredPrinters"] = [["Name": "Office", "Status": "Missing"]]
+        try jsonData(conflict).write(to: root.appendingPathComponent("Client Logs/PC001/latest.json")); controller.refreshReports()
+        guard controller.computerTable.rows[0]["Status"] == "Needs attention", controller.computerTable.rows[0]["Configuration"] == "Current", controller.detail.string.contains("not confirmation"), controller.detail.string.contains("Configured queue missing") else { throw DeploymentError("Existing-device conflicts are not clearly separated from configuration currency.") }
         let vendor = root.appendingPathComponent("Drivers/test"); try FileManager.default.createDirectory(at: vendor, withIntermediateDirectories: true)
         let inf = "[Version]\nClass=Printer\nClassVer=4.0\n[Manufacturer]\nVendor=Models,NTamd64,NTarm64\n[Models.NTamd64]\n\"Shared\"=Install,ID\n[Models.NTarm64]\n\"Shared\"=Install,ID\n\"ARM-only\"=Install,ARMID\n"
         try Data(inf.utf8).write(to: vendor.appendingPathComponent("printer.inf"))
@@ -79,7 +86,8 @@ enum MacSmoke {
         controller.window.contentView?.layoutSubtreeIfNeeded()
         if let directory = ProcessInfo.processInfo.environment["PD_MAC_SCREENSHOTS"] {
             let destination = URL(fileURLWithPath: directory); try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-            for (view, name) in [(controller.window.contentView!, "configuration"), (editor.dialog.contentView!, "ipp-editor")] {
+            controller.tabs.selectTabViewItem(at: 1); controller.window.contentView?.layoutSubtreeIfNeeded()
+            for (view, name) in [(controller.window.contentView!, "computer-status"), (editor.dialog.contentView!, "ipp-editor")] {
                 view.layoutSubtreeIfNeeded()
                 guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw DeploymentError("Could not render Mac UI.") }
                 view.cacheDisplay(in: view.bounds, to: bitmap)

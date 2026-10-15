@@ -102,6 +102,41 @@ final class DeploymentModel {
         ["SchemaVersion": 1, "DeploymentId": UUID().uuidString.lowercased(), "Architecture": "x64", "Printers": [JSON](), "ClientRemovals": [JSON](),
          "Cleanup": ["RemoveStaleManaged": false, "CleanupUserConnections": false, "LegacyPrinterNames": [String]()]]
     }
+    static func configurationContentHash(_ config: JSON) -> String {
+        func encode(_ value: Any) -> String {
+            if value is NSNull { return "z" }
+            if let value = value as? String { return "s\(value.utf8.count):" + value }
+            if let value = value as? NSNumber {
+                if CFGetTypeID(value) == CFBooleanGetTypeID() { return value.boolValue ? "b1" : "b0" }
+                return "n" + NSDecimalNumber(decimal: value.decimalValue).stringValue + ";"
+            }
+            if let value = value as? JSON {
+                let keys = value.keys.filter { $0 != "RequestedAt" }.sorted { $0.utf16.lexicographicallyPrecedes($1.utf16) }
+                return "o\(keys.count):" + keys.map { encode($0) + encode(value[$0]!) }.joined()
+            }
+            if let value = value as? [Any] { return "a\(value.count):" + value.map(encode).joined() }
+            preconditionFailure("Configuration must contain only JSON values.")
+        }
+        return SHA256.hash(data: Data(("PDConfig1:" + encode(config)).utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+    static func configurationStatus(_ report: JSON?, config: JSON, unsaved: Bool = false) -> String {
+        if unsaved { return "Unsaved changes" }
+        guard let report = report else { return "No computer report" }
+        let hash = text(report, "ConfigurationContentHash")
+        guard !hash.isEmpty else { return "Not compared" }
+        return hash == configurationContentHash(config) ? "Current" : "Update pending"
+    }
+    static func printerStatusText(_ status: String) -> String {
+        ["Installed": "Installed and verified", "Missing": "Configured queue missing", "Needs reconciliation": "Present; settings not verified", "Unknown": "Inventory unavailable", "Unsupported architecture": "Skipped; no compatible driver"][status] ?? status
+    }
+    static func reportErrorExplanation(_ message: String) -> String {
+        let message = message.lowercased()
+        if message.contains("specified printer already exists") || message.contains("0x8007070a") || message.contains("0x800700b7") {
+            return "Windows reported a printer/device registration conflict while adding a queue. This is not confirmation that the requested queue is installed. Check the per-printer verification below and review older copies in Reported printers."
+        }
+        if message.contains("exists outside this tool's management") || message.contains("name conflict:") { return "A same-name queue is present, but this deployment could not verify its connection/ownership. Review its driver and port before renaming or removing an old copy." }
+        return ""
+    }
     func open(_ url: URL) throws {
         let data = try readJSONBytes(url)
         guard let candidate = try JSONSerialization.jsonObject(with: data) as? JSON else { throw DeploymentError("Expected a configuration JSON object.") }
@@ -277,6 +312,7 @@ final class DeploymentModel {
         guard matches(computer, "^[A-Za-z0-9][A-Za-z0-9-]{0,62}$"), report["SchemaVersion"] as? Int == 1,
               ["Success", "Failed"].contains(text(report, "Result")), report["Printers"] is [JSON], report["ConfiguredPrinters"] is [JSON], report["RemovalResults"] is [JSON],
               Self.date(text(report, "ReportedAt")) != nil, matches(text(report, "ConfigurationHash"), "^[0-9a-f]{64}$") else { throw DeploymentError("Invalid report format.") }
+        if report["ConfigurationContentHash"] != nil && !matches(text(report, "ConfigurationContentHash"), "^[0-9a-f]{64}$") { throw DeploymentError("Invalid report content revision.") }
         let expected: String
         if scope == "Machine" && sid.isEmpty { expected = computer.uppercased() }
         else if scope == "UserConnection" && matches(sid, "^S-1-[0-9]+(-[0-9]+)+$") {

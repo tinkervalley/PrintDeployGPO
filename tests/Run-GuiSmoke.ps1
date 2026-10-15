@@ -106,6 +106,7 @@ try {
     $computerGrid=($clientFields | Where-Object { $_ -is [System.Windows.Forms.DataGridView] -and $_.Columns.Contains('Computer') })
     $printerGrid=($clientFields | Where-Object { $_ -is [System.Windows.Forms.DataGridView] -and $_.Columns.Contains('Remove') })
     Assert-Gui ($computerGrid.Rows.Count -eq 1 -and $printerGrid.Rows.Count -eq 2) 'Combined computer/user GUI did not deduplicate local queues.'
+    Assert-Gui ($computerGrid.Columns['Result'].HeaderText -eq 'Last run' -and $computerGrid.Columns['Configuration'].HeaderText -eq 'Configuration' -and $computerGrid.Rows[0].Cells['Result'].Value -eq 'Completed' -and $computerGrid.Rows[0].Cells['Configuration'].Value -eq 'Current') 'Run result and configuration revision were not independently displayed.'
     $userRow=@($printerGrid.Rows | Where-Object { $_.Tag.Report.Scope -eq 'UserConnection' })[0]
     $userRow.Cells['Remove'].Value=$true
     Assert-Gui ($data.Config.ClientRemovals.Count -eq 1 -and $data.Config.ClientRemovals[0].UserSid -eq $user.UserSid) 'Combined inventory selection targeted the wrong context.'

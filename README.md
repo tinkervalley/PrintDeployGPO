@@ -230,6 +230,14 @@ Logs, queue inventories and managed ownership state are local under `%ProgramDat
 
 Keep `DeploymentId` and local `state.json` when updating a deployment. Removing state loses managed ownership and can cause name conflicts. Review logs on a test client before troubleshooting with manual state deletion. Save bundle updates while deployments are not running; script/module file copying is not an atomic release operation. JSON saves are atomic, and packages use unique directories.
 
+## Understanding computer status
+
+The Computers view separates **Last run** from **Configuration**. **Completed** means that context's last run succeeded; **Needs attention** means it reported a failure, which may affect only some printers. **Verified** counts the configured queues checked against this deployment's saved state. Each printer has a separate verification result: installed and verified, configured queue missing, present with settings not verified, inventory unavailable, or skipped because no compatible driver is available.
+
+**Current** means the settings match the computer's report. **Update pending** means the loaded settings differ and a new run is needed after saving. **Unsaved changes** means you must publish your edits first. These labels do not turn a successful prior run into a failure. The Mac app no longer uses the JSON file's modification time to show “older than configuration”: saving or copying an unchanged file is not evidence of an unapplied change. Older Mac client reports show **Not compared** until you save an updated deployment bundle and a client uploads the new content revision. A missing/old user report does not make the computer configuration outdated.
+
+A verified existing queue is reused successfully. Windows' **“The specified printer already exists”** error during IPP discovery is different: Windows rejected creation, and the requested queue may still be missing, even if an older copy of the physical printer appears under another name. The app explains this conflict and retains technical details. Review the reported queue names, drivers and ports before removing any old copy; the tool does not assume two queues target the same device merely because their names/drivers look similar.
+
 ## Validation included in this project
 
 ```powershell
